@@ -1,7 +1,7 @@
 #ifndef BINMAP_H
 #define BINMAP_H
 
-#include <SDL3/SDL.h>
+#include <SDL2/SDL.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

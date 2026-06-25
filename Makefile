@@ -1,7 +1,7 @@
 CC      ?= cc
 CFLAGS  ?= -Wall -Wextra -O2 -std=c11
-CFLAGS  += $(shell pkg-config --cflags sdl3)
-LDFLAGS += $(shell pkg-config --libs sdl3) -lm
+CFLAGS  += $(shell pkg-config --cflags sdl2)
+LDFLAGS += $(shell pkg-config --libs sdl2) -lm
 
 SRC = src/main.c src/render.c src/font.c
 OBJ = $(SRC:.c=.o)

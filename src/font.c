@@ -79,10 +79,10 @@ void draw_text(SDL_Renderer *r, int x, int y, int scale, SDL_Color color, const 
             if (!bits) continue;
             for (int col = 0; col < FONT_W; col++) {
                 if (bits & (1u << (FONT_W - 1 - col))) {
-                    SDL_FRect rr = {
-                        (float)(cx + col * scale),
-                        (float)(y  + row * scale),
-                        (float)scale, (float)scale
+                    SDL_Rect rr = {
+                        cx + col * scale,
+                        y  + row * scale,
+                        scale, scale
                     };
                     SDL_RenderFillRect(r, &rr);
                 }

@@ -1,7 +1,7 @@
 #ifndef BINMAP_FONT_H
 #define BINMAP_FONT_H
 
-#include <SDL3/SDL.h>
+#include <SDL2/SDL.h>
 #include <stdint.h>
 
 #define FONT_W 5

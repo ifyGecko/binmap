@@ -154,7 +154,6 @@ static SDL_Texture *ensure_view_texture(binmap_app_t *app, view_id_t view, int c
                                              SDL_TEXTUREACCESS_STATIC,
                                              cw, ch);
         if (!app->cache[view]) { free(pixels); return NULL; }
-        SDL_SetTextureScaleMode(app->cache[view], SDL_SCALEMODE_NEAREST);
     }
     SDL_UpdateTexture(app->cache[view], NULL, pixels, cw * (int)sizeof(uint32_t));
     free(pixels);
@@ -179,10 +178,10 @@ static const char *basename_of(const char *p)
 
 static void draw_status_bar(binmap_app_t *app)
 {
-    SDL_FRect bar = {0, 0, (float)app->win_w, (float)STATUS_BAR_H};
+    SDL_Rect bar = {0, 0, app->win_w, STATUS_BAR_H};
     SDL_SetRenderDrawColor(app->renderer, 22, 22, 28, 255);
     SDL_RenderFillRect(app->renderer, &bar);
-    SDL_FRect sep = {0, (float)(STATUS_BAR_H - 1), (float)app->win_w, 1.0f};
+    SDL_Rect sep = {0, STATUS_BAR_H - 1, app->win_w, 1};
     SDL_SetRenderDrawColor(app->renderer, 70, 70, 90, 255);
     SDL_RenderFillRect(app->renderer, &sep);
 
@@ -260,11 +259,11 @@ static void draw_legend(binmap_app_t *app)
     if (y0 < STATUS_BAR_H) y0 = STATUS_BAR_H;
 
     SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
-    SDL_FRect bg = {(float)x0, (float)y0, (float)legend_w, (float)legend_h};
+    SDL_Rect bg = {x0, y0, legend_w, legend_h};
     SDL_SetRenderDrawColor(app->renderer, 18, 18, 24, 225);
     SDL_RenderFillRect(app->renderer, &bg);
     SDL_SetRenderDrawColor(app->renderer, 90, 90, 115, 255);
-    SDL_RenderRect(app->renderer, &bg);
+    SDL_RenderDrawRect(app->renderer, &bg);
 
     SDL_Color hdr      = {255, 200, 100, 255};
     SDL_Color key_col  = {120, 220, 255, 255};
@@ -279,8 +278,7 @@ static void draw_legend(binmap_app_t *app)
     /* column headers */
     draw_text(app->renderer, col1_x, y, scale, hdr, "VIEWS  (TAB CYCLES)");
     draw_text(app->renderer, col2_x, y, scale, hdr, "CONTROLS");
-    SDL_FRect ul = {(float)(x0 + pad), (float)(y + FONT_H * scale + 2),
-                    (float)content_w, 1.0f};
+    SDL_Rect ul = {x0 + pad, y + FONT_H * scale + 2, content_w, 1};
     SDL_SetRenderDrawColor(app->renderer, 90, 90, 115, 255);
     SDL_RenderFillRect(app->renderer, &ul);
     y += header_h;
@@ -314,8 +312,8 @@ static void redraw(binmap_app_t *app)
     if (cw > 0 && ch > 0) {
         SDL_Texture *tex = ensure_view_texture(app, app->current_view, cw, ch);
         if (tex) {
-            SDL_FRect dst = {0, (float)STATUS_BAR_H, (float)cw, (float)ch};
-            SDL_RenderTexture(app->renderer, tex, NULL, &dst);
+            SDL_Rect dst = {0, STATUS_BAR_H, cw, ch};
+            SDL_RenderCopy(app->renderer, tex, NULL, &dst);
         }
     }
 
@@ -371,25 +369,25 @@ static void handle_key(binmap_app_t *app, SDL_Keycode k, SDL_Keymod mod, bool *r
 {
     switch (k) {
     case SDLK_ESCAPE:
-    case SDLK_Q: *running = false; break;
+    case SDLK_q: *running = false; break;
     case SDLK_TAB: {
         int n = VIEW_COUNT;
-        int delta = (mod & SDL_KMOD_SHIFT) ? -1 : 1;
+        int delta = (mod & KMOD_SHIFT) ? -1 : 1;
         int next = ((int)app->current_view + delta + n) % n;
         switch_view(app, (view_id_t)next);
         break;
     }
-    case SDLK_L:
+    case SDLK_l:
         app->show_legend = !app->show_legend;
         app->needs_redraw = true;
         break;
-    case SDLK_A:
+    case SDLK_a:
         if (view_is_3d(app->current_view)) {
             app->auto_rotate = !app->auto_rotate;
             app->needs_redraw = true;
         }
         break;
-    case SDLK_R: reset_view(app); break;
+    case SDLK_r: reset_view(app); break;
     case SDLK_LEFT:  rotate_3d(app, -0.08f, 0); break;
     case SDLK_RIGHT: rotate_3d(app, +0.08f, 0); break;
     case SDLK_UP:    rotate_3d(app, 0, -0.08f); break;
@@ -424,21 +422,32 @@ int main(int argc, char **argv)
     binmap_app_t app = {0};
     if (!load_file(&app.file, argv[1])) return 1;
 
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
 
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+
     app.win_w = 1100;
     app.win_h = 800;
-    if (!SDL_CreateWindowAndRenderer("binmap", app.win_w, app.win_h,
-                                     SDL_WINDOW_RESIZABLE,
-                                     &app.window, &app.renderer)) {
-        fprintf(stderr, "SDL_CreateWindowAndRenderer: %s\n", SDL_GetError());
+    app.window = SDL_CreateWindow("binmap",
+                                  SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                                  app.win_w, app.win_h,
+                                  SDL_WINDOW_RESIZABLE);
+    if (!app.window) {
+        fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
         SDL_Quit();
         return 1;
     }
-    SDL_SetRenderVSync(app.renderer, 1);
+    app.renderer = SDL_CreateRenderer(app.window, -1,
+                                      SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (!app.renderer) {
+        fprintf(stderr, "SDL_CreateRenderer: %s\n", SDL_GetError());
+        SDL_DestroyWindow(app.window);
+        SDL_Quit();
+        return 1;
+    }
 
     app.show_legend = true;
     app.current_view = VIEW_BYTE_CLASS;
@@ -449,7 +458,7 @@ int main(int argc, char **argv)
     app.auto_rotate = true;
 
     bool running = true;
-    Uint64 last_tick = SDL_GetTicks();
+    Uint32 last_tick = SDL_GetTicks();
     while (running) {
         bool animating = view_is_3d(app.current_view) && app.auto_rotate;
 
@@ -469,21 +478,26 @@ int main(int argc, char **argv)
         if (got) {
             do {
                 switch (ev.type) {
-                case SDL_EVENT_QUIT:
+                case SDL_QUIT:
                     running = false; break;
-                case SDL_EVENT_WINDOW_RESIZED:
-                case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
-                    app.win_w = ev.window.data1;
-                    app.win_h = ev.window.data2;
-                    app.needs_redraw = true;
+                case SDL_WINDOWEVENT:
+                    switch (ev.window.event) {
+                    case SDL_WINDOWEVENT_RESIZED:
+                    case SDL_WINDOWEVENT_SIZE_CHANGED:
+                        app.win_w = ev.window.data1;
+                        app.win_h = ev.window.data2;
+                        app.needs_redraw = true;
+                        break;
+                    case SDL_WINDOWEVENT_EXPOSED:
+                        app.needs_redraw = true;
+                        break;
+                    default: break;
+                    }
                     break;
-                case SDL_EVENT_WINDOW_EXPOSED:
-                    app.needs_redraw = true;
+                case SDL_KEYDOWN:
+                    handle_key(&app, ev.key.keysym.sym, ev.key.keysym.mod, &running);
                     break;
-                case SDL_EVENT_KEY_DOWN:
-                    handle_key(&app, ev.key.key, ev.key.mod, &running);
-                    break;
-                case SDL_EVENT_MOUSE_WHEEL:
+                case SDL_MOUSEWHEEL:
                     if (view_is_3d(app.current_view)) {
                         if (ev.wheel.y > 0)      zoom_3d(&app, ZOOM_STEP);
                         else if (ev.wheel.y < 0) zoom_3d(&app, 1.0f / ZOOM_STEP);
@@ -495,7 +509,7 @@ int main(int argc, char **argv)
         }
 
         if (animating) {
-            Uint64 now = SDL_GetTicks();
+            Uint32 now = SDL_GetTicks();
             float dt = (float)(now - last_tick) / 1000.0f;
             if (dt > 0.1f) dt = 0.1f;
             last_tick = now;
