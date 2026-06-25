@@ -57,11 +57,20 @@ static const struct {
     {"ARROWS",  "ROTATE (3D)"},
     {"+/-/WHL", "ZOOM (3D)"},
     {"R",       "RESET 3D VIEW"},
+    {"[ / ]",   "RANGE START -/+"},
+    {", / .",   "RANGE END -/+"},
+    {"SHF+KEY", "COARSE STEP"},
+    {"0",       "RESET RANGE"},
+    {"DRAG",    "RANGE SLIDER"},
     {"ESC",     "QUIT"},
 };
 #define CTRL_KEYS_COUNT (sizeof(ctrl_keys) / sizeof(ctrl_keys[0]))
 
 #define STATUS_BAR_H 30
+#define SLIDER_BAR_H 44
+#define MIN_RANGE_BYTES 256
+#define HANDLE_GRAB_PX  8
+#define TRACK_MARGIN_X  12
 
 static bool load_file(binmap_file_t *f, const char *path)
 {
@@ -111,39 +120,42 @@ static SDL_Texture *ensure_view_texture(binmap_app_t *app, view_id_t view, int c
     uint32_t *pixels = (uint32_t *)calloc((size_t)cw * (size_t)ch, sizeof(uint32_t));
     if (!pixels) return NULL;
 
+    const uint8_t *d = app->file.data + app->range_start;
+    size_t         s = app->range_end - app->range_start;
+
     switch (view) {
-    case VIEW_BYTE_CLASS:  render_byte_class(pixels, cw, ch, app->file.data, app->file.size); break;
-    case VIEW_HILBERT:     render_hilbert   (pixels, cw, ch, app->file.data, app->file.size); break;
-    case VIEW_DIGRAPH:     render_digraph   (pixels, cw, ch, app->file.data, app->file.size); break;
+    case VIEW_BYTE_CLASS:  render_byte_class(pixels, cw, ch, d, s); break;
+    case VIEW_HILBERT:     render_hilbert   (pixels, cw, ch, d, s); break;
+    case VIEW_DIGRAPH:     render_digraph   (pixels, cw, ch, d, s); break;
     case VIEW_MARKOV_CHORD:
-        render_markov_chord(pixels, cw, ch, app->file.data, app->file.size); break;
-    case VIEW_ENTROPY:     render_entropy   (pixels, cw, ch, app->file.data, app->file.size); break;
+        render_markov_chord(pixels, cw, ch, d, s); break;
+    case VIEW_ENTROPY:     render_entropy   (pixels, cw, ch, d, s); break;
     case VIEW_AUTOCORRELATION:
-        render_autocorrelation(pixels, cw, ch, app->file.data, app->file.size); break;
+        render_autocorrelation(pixels, cw, ch, d, s); break;
     case VIEW_STRINGS_DENSITY:
-        render_strings_density(pixels, cw, ch, app->file.data, app->file.size); break;
+        render_strings_density(pixels, cw, ch, d, s); break;
     case VIEW_SELF_SIMILARITY:
-        render_self_similarity(pixels, cw, ch, app->file.data, app->file.size); break;
-    case VIEW_BIT_PLANE:   render_bit_plane (pixels, cw, ch, app->file.data, app->file.size); break;
-    case VIEW_HISTOGRAM:   render_histogram (pixels, cw, ch, app->file.data, app->file.size); break;
-    case VIEW_MORTON:      render_morton    (pixels, cw, ch, app->file.data, app->file.size); break;
+        render_self_similarity(pixels, cw, ch, d, s); break;
+    case VIEW_BIT_PLANE:   render_bit_plane (pixels, cw, ch, d, s); break;
+    case VIEW_HISTOGRAM:   render_histogram (pixels, cw, ch, d, s); break;
+    case VIEW_MORTON:      render_morton    (pixels, cw, ch, d, s); break;
     case VIEW_RGB_RAW:
-        render_rgb_raw    (pixels, cw, ch, app->file.data, app->file.size); break;
-    case VIEW_POLAR:       render_polar     (pixels, cw, ch, app->file.data, app->file.size); break;
+        render_rgb_raw    (pixels, cw, ch, d, s); break;
+    case VIEW_POLAR:       render_polar     (pixels, cw, ch, d, s); break;
     case VIEW_CONCENTRIC_RINGS:
-        render_concentric_rings(pixels, cw, ch, app->file.data, app->file.size); break;
+        render_concentric_rings(pixels, cw, ch, d, s); break;
     case VIEW_CIRCULAR_HILBERT:
-        render_circular_hilbert(pixels, cw, ch, app->file.data, app->file.size); break;
-    case VIEW_CYLINDRICAL: render_cylindrical(pixels, cw, ch, app->file.data, app->file.size,
+        render_circular_hilbert(pixels, cw, ch, d, s); break;
+    case VIEW_CYLINDRICAL: render_cylindrical(pixels, cw, ch, d, s,
                                               app->yaw, app->pitch, app->zoom); break;
-    case VIEW_HELICAL:     render_helical   (pixels, cw, ch, app->file.data, app->file.size,
+    case VIEW_HELICAL:     render_helical   (pixels, cw, ch, d, s,
                                              app->yaw, app->pitch, app->zoom); break;
-    case VIEW_TORUS:       render_torus     (pixels, cw, ch, app->file.data, app->file.size,
+    case VIEW_TORUS:       render_torus     (pixels, cw, ch, d, s,
                                              app->yaw, app->pitch, app->zoom); break;
-    case VIEW_TRIGRAPH:    render_trigraph  (pixels, cw, ch, app->file.data, app->file.size,
+    case VIEW_TRIGRAPH:    render_trigraph  (pixels, cw, ch, d, s,
                                              app->yaw, app->pitch, app->zoom); break;
     case VIEW_TRIGRAPH_SPHERICAL:
-        render_trigraph_spherical(pixels, cw, ch, app->file.data, app->file.size,
+        render_trigraph_spherical(pixels, cw, ch, d, s,
                                   app->yaw, app->pitch, app->zoom); break;
     default: free(pixels); return NULL;
     }
@@ -161,6 +173,164 @@ static SDL_Texture *ensure_view_texture(binmap_app_t *app, view_id_t view, int c
     app->cache_w = cw;
     app->cache_h = ch;
     return app->cache[view];
+}
+
+static void format_size(char *buf, size_t bufsz, size_t s);
+
+/* ---------- range slider ---------- */
+
+static int slider_track_x(const binmap_app_t *app) { (void)app; return TRACK_MARGIN_X; }
+static int slider_track_w(const binmap_app_t *app)
+{
+    int w = app->win_w - 2 * TRACK_MARGIN_X;
+    return w < 1 ? 1 : w;
+}
+static int slider_track_h(void) { return 14; }
+static int slider_track_y(const binmap_app_t *app)
+{
+    /* lower portion of the slider strip */
+    return app->win_h - SLIDER_BAR_H + 20;
+}
+
+static int byte_to_px(const binmap_app_t *app, size_t b)
+{
+    if (app->file.size == 0) return slider_track_x(app);
+    double t = (double)b / (double)app->file.size;
+    if (t < 0) t = 0; else if (t > 1) t = 1;
+    return slider_track_x(app) + (int)(t * slider_track_w(app) + 0.5);
+}
+
+static size_t px_to_byte(const binmap_app_t *app, int x)
+{
+    int tx = slider_track_x(app);
+    int tw = slider_track_w(app);
+    if (x <= tx) return 0;
+    if (x >= tx + tw) return app->file.size;
+    double t = (double)(x - tx) / (double)tw;
+    size_t b = (size_t)(t * (double)app->file.size + 0.5);
+    if (b > app->file.size) b = app->file.size;
+    return b;
+}
+
+static SDL_Texture *ensure_minimap_texture(binmap_app_t *app, int w)
+{
+    if (w < 1) return NULL;
+    if (app->minimap_tex && app->minimap_w == w) return app->minimap_tex;
+    if (app->minimap_tex) { SDL_DestroyTexture(app->minimap_tex); app->minimap_tex = NULL; }
+    uint32_t *row = (uint32_t *)calloc((size_t)w, sizeof(uint32_t));
+    if (!row) return NULL;
+    render_byte_class(row, w, 1, app->file.data, app->file.size);
+    app->minimap_tex = SDL_CreateTexture(app->renderer,
+                                         SDL_PIXELFORMAT_ARGB8888,
+                                         SDL_TEXTUREACCESS_STATIC, w, 1);
+    if (!app->minimap_tex) { free(row); return NULL; }
+    SDL_SetTextureScaleMode(app->minimap_tex, SDL_SCALEMODE_NEAREST);
+    SDL_UpdateTexture(app->minimap_tex, NULL, row, w * (int)sizeof(uint32_t));
+    free(row);
+    app->minimap_w = w;
+    return app->minimap_tex;
+}
+
+static void format_offset(char *buf, size_t bufsz, size_t off)
+{
+    snprintf(buf, bufsz, "0x%zX", off);
+}
+
+static void draw_range_slider(binmap_app_t *app)
+{
+    int strip_y = app->win_h - SLIDER_BAR_H;
+
+    SDL_FRect strip = {0, (float)strip_y, (float)app->win_w, (float)SLIDER_BAR_H};
+    SDL_SetRenderDrawColor(app->renderer, 22, 22, 28, 255);
+    SDL_RenderFillRect(app->renderer, &strip);
+    SDL_FRect sep = {0, (float)strip_y, (float)app->win_w, 1.0f};
+    SDL_SetRenderDrawColor(app->renderer, 70, 70, 90, 255);
+    SDL_RenderFillRect(app->renderer, &sep);
+
+    int tx = slider_track_x(app);
+    int tw = slider_track_w(app);
+    int ty = slider_track_y(app);
+    int th = slider_track_h();
+
+    /* minimap behind the track */
+    SDL_Texture *mm = ensure_minimap_texture(app, tw);
+    if (mm) {
+        SDL_FRect dst = {(float)tx, (float)ty, (float)tw, (float)th};
+        SDL_RenderTexture(app->renderer, mm, NULL, &dst);
+    } else {
+        SDL_FRect dst = {(float)tx, (float)ty, (float)tw, (float)th};
+        SDL_SetRenderDrawColor(app->renderer, 40, 40, 50, 255);
+        SDL_RenderFillRect(app->renderer, &dst);
+    }
+
+    int sx = byte_to_px(app, app->range_start);
+    int ex = byte_to_px(app, app->range_end);
+    if (ex < sx) ex = sx;
+
+    /* dim the regions outside the selected band */
+    SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(app->renderer, 0, 0, 0, 160);
+    if (sx > tx) {
+        SDL_FRect lhs = {(float)tx, (float)ty, (float)(sx - tx), (float)th};
+        SDL_RenderFillRect(app->renderer, &lhs);
+    }
+    if (ex < tx + tw) {
+        SDL_FRect rhs = {(float)ex, (float)ty, (float)(tx + tw - ex), (float)th};
+        SDL_RenderFillRect(app->renderer, &rhs);
+    }
+
+    /* track border */
+    SDL_FRect border = {(float)tx, (float)ty, (float)tw, (float)th};
+    SDL_SetRenderDrawColor(app->renderer, 90, 90, 115, 255);
+    SDL_RenderRect(app->renderer, &border);
+
+    /* handles */
+    int handle_w = 6;
+    int handle_h = th + 8;
+    int handle_y = ty - 4;
+    SDL_Color start_col = (app->drag_mode == DRAG_START)
+                          ? (SDL_Color){255, 240, 160, 255}
+                          : (SDL_Color){255, 200, 100, 255};
+    SDL_Color end_col   = (app->drag_mode == DRAG_END)
+                          ? (SDL_Color){255, 240, 160, 255}
+                          : (SDL_Color){255, 200, 100, 255};
+    SDL_FRect hs = {(float)(sx - handle_w/2), (float)handle_y, (float)handle_w, (float)handle_h};
+    SDL_FRect he = {(float)(ex - handle_w/2), (float)handle_y, (float)handle_w, (float)handle_h};
+    SDL_SetRenderDrawColor(app->renderer, start_col.r, start_col.g, start_col.b, 255);
+    SDL_RenderFillRect(app->renderer, &hs);
+    SDL_SetRenderDrawColor(app->renderer, end_col.r, end_col.g, end_col.b, 255);
+    SDL_RenderFillRect(app->renderer, &he);
+    SDL_SetRenderDrawColor(app->renderer, 20, 20, 25, 255);
+    SDL_RenderRect(app->renderer, &hs);
+    SDL_RenderRect(app->renderer, &he);
+
+    /* labels above the track */
+    int label_y = strip_y + 4;
+    int scale = 2;
+    SDL_Color label_col = {200, 200, 215, 255};
+    SDL_Color dim_col   = {150, 150, 165, 255};
+
+    char lstart[64], lend[64], lmid[96];
+    char sstart[32], send[32], slen[32];
+    format_offset(sstart, sizeof(sstart), app->range_start);
+    format_offset(send,   sizeof(send),   app->range_end);
+    format_size(slen, sizeof(slen), app->range_end - app->range_start);
+    snprintf(lstart, sizeof(lstart), "START %s", sstart);
+    snprintf(lend,   sizeof(lend),   "END %s",   send);
+    double pct = app->file.size
+                 ? 100.0 * (double)(app->range_end - app->range_start) / (double)app->file.size
+                 : 0.0;
+    snprintf(lmid, sizeof(lmid), "LEN %s (%.1f%%)", slen, pct);
+
+    draw_text(app->renderer, tx, label_y, scale, label_col, lstart);
+    int mw = text_width(scale, lmid);
+    int mx_text = tx + (tw - mw) / 2;
+    if (mx_text < tx) mx_text = tx;
+    draw_text(app->renderer, mx_text, label_y, scale, dim_col, lmid);
+    int rw = text_width(scale, lend);
+    int rxp = tx + tw - rw;
+    if (rxp < mx_text + mw + 10) rxp = mx_text + mw + 10;
+    draw_text(app->renderer, rxp, label_y, scale, label_col, lend);
 }
 
 static void format_size(char *buf, size_t bufsz, size_t s)
@@ -196,17 +366,24 @@ static void draw_status_bar(binmap_app_t *app)
     SDL_Color title_color = {255, 200, 100, 255};
     draw_text(app->renderer, 10, 8, 2, title_color, left);
 
+    char range_info[64] = "";
+    if (app->range_start != 0 || app->range_end != app->file.size) {
+        snprintf(range_info, sizeof(range_info),
+                 "  [0x%zX..0x%zX]", app->range_start, app->range_end);
+    }
+
     char right[512];
     if (view_is_3d(app->current_view)) {
         snprintf(right, sizeof(right),
-                 "%s (%s)  YAW %.0f  PITCH %.0f  ZOOM %.2fX%s",
-                 basename_of(app->file.path), sz,
+                 "%s (%s)%s  YAW %.0f  PITCH %.0f  ZOOM %.2fX%s",
+                 basename_of(app->file.path), sz, range_info,
                  app->yaw   * 180.0 / M_PI,
                  app->pitch * 180.0 / M_PI,
                  app->zoom,
                  app->auto_rotate ? "  AUTO" : "");
     } else {
-        snprintf(right, sizeof(right), "%s (%s)", basename_of(app->file.path), sz);
+        snprintf(right, sizeof(right), "%s (%s)%s",
+                 basename_of(app->file.path), sz, range_info);
     }
     SDL_Color text_color = {200, 200, 215, 255};
     int rw = text_width(2, right);
@@ -255,7 +432,7 @@ static void draw_legend(binmap_app_t *app)
     int legend_h = header_h + rows * line_h + pad + section_gap;
 
     int x0 = app->win_w - legend_w - 12;
-    int y0 = app->win_h - legend_h - 12;
+    int y0 = app->win_h - legend_h - SLIDER_BAR_H - 12;
     if (x0 < 0) x0 = 0;
     if (y0 < STATUS_BAR_H) y0 = STATUS_BAR_H;
 
@@ -310,7 +487,7 @@ static void redraw(binmap_app_t *app)
     SDL_RenderClear(app->renderer);
 
     int cw = app->win_w;
-    int ch = app->win_h - STATUS_BAR_H;
+    int ch = app->win_h - STATUS_BAR_H - SLIDER_BAR_H;
     if (cw > 0 && ch > 0) {
         SDL_Texture *tex = ensure_view_texture(app, app->current_view, cw, ch);
         if (tex) {
@@ -321,6 +498,7 @@ static void redraw(binmap_app_t *app)
 
     draw_status_bar(app);
     draw_legend(app);
+    draw_range_slider(app);
     SDL_RenderPresent(app->renderer);
 }
 
@@ -357,6 +535,58 @@ static void zoom_3d(binmap_app_t *app, float factor)
     app->needs_redraw = true;
 }
 
+static size_t range_min_width(const binmap_app_t *app)
+{
+    return app->file.size < MIN_RANGE_BYTES ? app->file.size : MIN_RANGE_BYTES;
+}
+
+static void set_range(binmap_app_t *app, size_t new_start, size_t new_end)
+{
+    size_t minw = range_min_width(app);
+    if (new_end > app->file.size) new_end = app->file.size;
+    if (new_start + minw > new_end) {
+        if (new_end >= minw) new_start = new_end - minw;
+        else                 new_start = 0;
+    }
+    if (new_start == app->range_start && new_end == app->range_end) return;
+    app->range_start = new_start;
+    app->range_end   = new_end;
+    invalidate_caches(app);
+    app->needs_redraw = true;
+}
+
+static void nudge_range_start(binmap_app_t *app, long delta)
+{
+    long s = (long)app->range_start + delta;
+    if (s < 0) s = 0;
+    size_t ns = (size_t)s;
+    size_t minw = range_min_width(app);
+    if (ns + minw > app->range_end) {
+        if (app->range_end >= minw) ns = app->range_end - minw; else ns = 0;
+    }
+    set_range(app, ns, app->range_end);
+}
+
+static void nudge_range_end(binmap_app_t *app, long delta)
+{
+    long e = (long)app->range_end + delta;
+    if (e < 0) e = 0;
+    size_t ne = (size_t)e;
+    if (ne > app->file.size) ne = app->file.size;
+    size_t minw = range_min_width(app);
+    if (app->range_start + minw > ne) ne = app->range_start + minw;
+    if (ne > app->file.size) ne = app->file.size;
+    set_range(app, app->range_start, ne);
+}
+
+static long range_step(const binmap_app_t *app, bool coarse)
+{
+    if (app->file.size == 0) return 1;
+    long step = coarse ? (long)(app->file.size / 100) : (long)(app->file.size / 1000);
+    if (step < 1) step = 1;
+    return step;
+}
+
 static void reset_view(binmap_app_t *app)
 {
     app->yaw = 0.6f;
@@ -364,6 +594,98 @@ static void reset_view(binmap_app_t *app)
     app->zoom = 1.0f;
     app->auto_rotate = true;
     invalidate_3d_caches(app);
+    app->needs_redraw = true;
+}
+
+static bool in_slider_strip(const binmap_app_t *app, int y)
+{
+    return y >= app->win_h - SLIDER_BAR_H && y < app->win_h;
+}
+
+static void handle_mouse_down(binmap_app_t *app, int mx, int my)
+{
+    if (!in_slider_strip(app, my)) return;
+    int sx = byte_to_px(app, app->range_start);
+    int ex = byte_to_px(app, app->range_end);
+    size_t minw = range_min_width(app);
+
+    if (abs(mx - sx) <= HANDLE_GRAB_PX) {
+        app->drag_mode = DRAG_START;
+    } else if (abs(mx - ex) <= HANDLE_GRAB_PX) {
+        app->drag_mode = DRAG_END;
+    } else if (mx > sx && mx < ex) {
+        app->drag_mode = DRAG_MIDDLE;
+    } else {
+        /* clicked on track outside selection: jump nearest handle there */
+        size_t target = px_to_byte(app, mx);
+        if (mx < sx) {
+            size_t ns = target;
+            if (ns + minw > app->range_end) {
+                if (app->range_end >= minw) ns = app->range_end - minw; else ns = 0;
+            }
+            app->range_start = ns;
+            app->drag_mode = DRAG_START;
+        } else {
+            size_t ne = target;
+            if (ne > app->file.size) ne = app->file.size;
+            if (app->range_start + minw > ne) ne = app->range_start + minw;
+            if (ne > app->file.size) ne = app->file.size;
+            app->range_end = ne;
+            app->drag_mode = DRAG_END;
+        }
+    }
+    app->drag_anchor_start = app->range_start;
+    app->drag_anchor_end   = app->range_end;
+    app->drag_anchor_px    = mx;
+    app->needs_redraw = true;
+}
+
+static void handle_mouse_motion(binmap_app_t *app, int mx)
+{
+    if (app->drag_mode == DRAG_NONE) return;
+    size_t minw = range_min_width(app);
+
+    if (app->drag_mode == DRAG_START) {
+        size_t ns = px_to_byte(app, mx);
+        if (ns + minw > app->range_end) {
+            if (app->range_end >= minw) ns = app->range_end - minw; else ns = 0;
+        }
+        if (ns != app->range_start) { app->range_start = ns; app->needs_redraw = true; }
+    } else if (app->drag_mode == DRAG_END) {
+        size_t ne = px_to_byte(app, mx);
+        if (ne > app->file.size) ne = app->file.size;
+        if (app->range_start + minw > ne) ne = app->range_start + minw;
+        if (ne > app->file.size) ne = app->file.size;
+        if (ne != app->range_end) { app->range_end = ne; app->needs_redraw = true; }
+    } else if (app->drag_mode == DRAG_MIDDLE) {
+        int tw = slider_track_w(app);
+        if (tw < 1 || app->file.size == 0) return;
+        double dpx = (double)(mx - app->drag_anchor_px);
+        long   dbytes = (long)(dpx / (double)tw * (double)app->file.size);
+        long   width = (long)(app->drag_anchor_end - app->drag_anchor_start);
+        long   ns = (long)app->drag_anchor_start + dbytes;
+        if (ns < 0) ns = 0;
+        if (ns + width > (long)app->file.size) ns = (long)app->file.size - width;
+        if (ns < 0) ns = 0;
+        size_t nstart = (size_t)ns;
+        size_t nend   = nstart + (size_t)width;
+        if (nstart != app->range_start || nend != app->range_end) {
+            app->range_start = nstart;
+            app->range_end   = nend;
+            app->needs_redraw = true;
+        }
+    }
+}
+
+static void handle_mouse_up(binmap_app_t *app)
+{
+    if (app->drag_mode == DRAG_NONE) return;
+    bool changed = (app->range_start != app->drag_anchor_start)
+                || (app->range_end   != app->drag_anchor_end);
+    app->drag_mode = DRAG_NONE;
+    if (changed) {
+        invalidate_caches(app);
+    }
     app->needs_redraw = true;
 }
 
@@ -399,6 +721,11 @@ static void handle_key(binmap_app_t *app, SDL_Keycode k, SDL_Keymod mod, bool *r
     case SDLK_KP_PLUS:  zoom_3d(app, ZOOM_STEP); break;
     case SDLK_MINUS:
     case SDLK_KP_MINUS: zoom_3d(app, 1.0f / ZOOM_STEP); break;
+    case SDLK_LEFTBRACKET:  nudge_range_start(app, -range_step(app, mod & SDL_KMOD_SHIFT)); break;
+    case SDLK_RIGHTBRACKET: nudge_range_start(app, +range_step(app, mod & SDL_KMOD_SHIFT)); break;
+    case SDLK_COMMA:        nudge_range_end  (app, -range_step(app, mod & SDL_KMOD_SHIFT)); break;
+    case SDLK_PERIOD:       nudge_range_end  (app, +range_step(app, mod & SDL_KMOD_SHIFT)); break;
+    case SDLK_0:            set_range(app, 0, app->file.size); break;
     default: break;
     }
 }
@@ -416,6 +743,11 @@ int main(int argc, char **argv)
             "  ARROWS           rotate (3D views)\n"
             "  + / - / WHEEL    zoom (3D views)\n"
             "  R                reset 3D view\n"
+            "  [ / ]            nudge range start backward / forward\n"
+            "  , / .            nudge range end backward / forward\n"
+            "  SHIFT+key        coarse range step\n"
+            "  0                reset range to full file\n"
+            "  MOUSE DRAG       adjust range via slider at bottom\n"
             "  ESC / Q          quit\n",
             argv[0]);
         return 1;
@@ -447,11 +779,15 @@ int main(int argc, char **argv)
     app.pitch = 0.35f;
     app.zoom = 1.0f;
     app.auto_rotate = true;
+    app.range_start = 0;
+    app.range_end   = app.file.size;
+    app.drag_mode   = DRAG_NONE;
 
     bool running = true;
     Uint64 last_tick = SDL_GetTicks();
     while (running) {
-        bool animating = view_is_3d(app.current_view) && app.auto_rotate;
+        bool animating = view_is_3d(app.current_view) && app.auto_rotate
+                         && app.drag_mode == DRAG_NONE;
 
         if (app.needs_redraw) {
             redraw(&app);
@@ -489,6 +825,18 @@ int main(int argc, char **argv)
                         else if (ev.wheel.y < 0) zoom_3d(&app, 1.0f / ZOOM_STEP);
                     }
                     break;
+                case SDL_EVENT_MOUSE_BUTTON_DOWN:
+                    if (ev.button.button == SDL_BUTTON_LEFT)
+                        handle_mouse_down(&app, (int)ev.button.x, (int)ev.button.y);
+                    break;
+                case SDL_EVENT_MOUSE_BUTTON_UP:
+                    if (ev.button.button == SDL_BUTTON_LEFT)
+                        handle_mouse_up(&app);
+                    break;
+                case SDL_EVENT_MOUSE_MOTION:
+                    if (app.drag_mode != DRAG_NONE)
+                        handle_mouse_motion(&app, (int)ev.motion.x);
+                    break;
                 default: break;
                 }
             } while (running && SDL_PollEvent(&ev));
@@ -507,6 +855,7 @@ int main(int argc, char **argv)
     }
 
     invalidate_caches(&app);
+    if (app.minimap_tex) { SDL_DestroyTexture(app.minimap_tex); app.minimap_tex = NULL; }
     if (app.renderer) SDL_DestroyRenderer(app.renderer);
     if (app.window)   SDL_DestroyWindow(app.window);
     SDL_Quit();
