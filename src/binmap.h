@@ -36,6 +36,13 @@ typedef struct {
     const char *path;
 } binmap_file_t;
 
+typedef enum {
+    DRAG_NONE = 0,
+    DRAG_START,
+    DRAG_END,
+    DRAG_MIDDLE
+} drag_mode_t;
+
 typedef struct {
     SDL_Window  *window;
     SDL_Renderer *renderer;
@@ -51,6 +58,16 @@ typedef struct {
     float pitch;
     float zoom;
     bool  auto_rotate;
+    /* range slider state */
+    size_t range_start;   /* inclusive */
+    size_t range_end;     /* exclusive */
+    drag_mode_t drag_mode;
+    size_t drag_anchor_start;
+    size_t drag_anchor_end;
+    int    drag_anchor_px;
+    /* whole-file minimap texture (1px tall byte_class strip stretched to track width) */
+    SDL_Texture *minimap_tex;
+    int          minimap_w;
 } binmap_app_t;
 
 extern const char *view_names[VIEW_COUNT];
