@@ -122,40 +122,42 @@ static SDL_Texture *ensure_view_texture(binmap_app_t *app, view_id_t view, int c
 
     const uint8_t *d = app->file.data + app->range_start;
     size_t         s = app->range_end - app->range_start;
+    size_t         bo = app->range_start;
+    size_t         fs = app->file.size;
 
     switch (view) {
-    case VIEW_BYTE_CLASS:  render_byte_class(pixels, cw, ch, d, s); break;
-    case VIEW_HILBERT:     render_hilbert   (pixels, cw, ch, d, s); break;
-    case VIEW_DIGRAPH:     render_digraph   (pixels, cw, ch, d, s); break;
+    case VIEW_BYTE_CLASS:  render_byte_class(pixels, cw, ch, d, s, bo, fs); break;
+    case VIEW_HILBERT:     render_hilbert   (pixels, cw, ch, d, s, bo, fs); break;
+    case VIEW_DIGRAPH:     render_digraph   (pixels, cw, ch, d, s, bo, fs); break;
     case VIEW_MARKOV_CHORD:
-        render_markov_chord(pixels, cw, ch, d, s); break;
-    case VIEW_ENTROPY:     render_entropy   (pixels, cw, ch, d, s); break;
+        render_markov_chord(pixels, cw, ch, d, s, bo, fs); break;
+    case VIEW_ENTROPY:     render_entropy   (pixels, cw, ch, d, s, bo, fs); break;
     case VIEW_AUTOCORRELATION:
-        render_autocorrelation(pixels, cw, ch, d, s); break;
+        render_autocorrelation(pixels, cw, ch, d, s, bo, fs); break;
     case VIEW_STRINGS_DENSITY:
-        render_strings_density(pixels, cw, ch, d, s); break;
+        render_strings_density(pixels, cw, ch, d, s, bo, fs); break;
     case VIEW_SELF_SIMILARITY:
-        render_self_similarity(pixels, cw, ch, d, s); break;
-    case VIEW_BIT_PLANE:   render_bit_plane (pixels, cw, ch, d, s); break;
-    case VIEW_HISTOGRAM:   render_histogram (pixels, cw, ch, d, s); break;
-    case VIEW_MORTON:      render_morton    (pixels, cw, ch, d, s); break;
+        render_self_similarity(pixels, cw, ch, d, s, bo, fs); break;
+    case VIEW_BIT_PLANE:   render_bit_plane (pixels, cw, ch, d, s, bo, fs); break;
+    case VIEW_HISTOGRAM:   render_histogram (pixels, cw, ch, d, s, bo, fs); break;
+    case VIEW_MORTON:      render_morton    (pixels, cw, ch, d, s, bo, fs); break;
     case VIEW_RGB_RAW:
-        render_rgb_raw    (pixels, cw, ch, d, s); break;
-    case VIEW_POLAR:       render_polar     (pixels, cw, ch, d, s); break;
+        render_rgb_raw    (pixels, cw, ch, d, s, bo, fs); break;
+    case VIEW_POLAR:       render_polar     (pixels, cw, ch, d, s, bo, fs); break;
     case VIEW_CONCENTRIC_RINGS:
-        render_concentric_rings(pixels, cw, ch, d, s); break;
+        render_concentric_rings(pixels, cw, ch, d, s, bo, fs); break;
     case VIEW_CIRCULAR_HILBERT:
-        render_circular_hilbert(pixels, cw, ch, d, s); break;
-    case VIEW_CYLINDRICAL: render_cylindrical(pixels, cw, ch, d, s,
+        render_circular_hilbert(pixels, cw, ch, d, s, bo, fs); break;
+    case VIEW_CYLINDRICAL: render_cylindrical(pixels, cw, ch, d, s, bo, fs,
                                               app->yaw, app->pitch, app->zoom); break;
-    case VIEW_HELICAL:     render_helical   (pixels, cw, ch, d, s,
+    case VIEW_HELICAL:     render_helical   (pixels, cw, ch, d, s, bo, fs,
                                              app->yaw, app->pitch, app->zoom); break;
-    case VIEW_TORUS:       render_torus     (pixels, cw, ch, d, s,
+    case VIEW_TORUS:       render_torus     (pixels, cw, ch, d, s, bo, fs,
                                              app->yaw, app->pitch, app->zoom); break;
-    case VIEW_TRIGRAPH:    render_trigraph  (pixels, cw, ch, d, s,
+    case VIEW_TRIGRAPH:    render_trigraph  (pixels, cw, ch, d, s, bo, fs,
                                              app->yaw, app->pitch, app->zoom); break;
     case VIEW_TRIGRAPH_SPHERICAL:
-        render_trigraph_spherical(pixels, cw, ch, d, s,
+        render_trigraph_spherical(pixels, cw, ch, d, s, bo, fs,
                                   app->yaw, app->pitch, app->zoom); break;
     default: free(pixels); return NULL;
     }
@@ -219,7 +221,7 @@ static SDL_Texture *ensure_minimap_texture(binmap_app_t *app, int w)
     if (app->minimap_tex) { SDL_DestroyTexture(app->minimap_tex); app->minimap_tex = NULL; }
     uint32_t *row = (uint32_t *)calloc((size_t)w, sizeof(uint32_t));
     if (!row) return NULL;
-    render_byte_class(row, w, 1, app->file.data, app->file.size);
+    render_byte_class(row, w, 1, app->file.data, app->file.size, 0, app->file.size);
     app->minimap_tex = SDL_CreateTexture(app->renderer,
                                          SDL_PIXELFORMAT_ARGB8888,
                                          SDL_TEXTUREACCESS_STATIC, w, 1);

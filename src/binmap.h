@@ -74,41 +74,62 @@ extern const char *view_names[VIEW_COUNT];
 
 bool view_is_3d(view_id_t v);
 
-/* 2D renderers */
-void render_byte_class(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size);
-void render_hilbert   (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size);
-void render_digraph   (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size);
-void render_entropy   (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size);
-void render_bit_plane (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size);
-void render_histogram (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size);
-void render_morton    (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size);
-void render_polar     (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size);
+/* 2D renderers. base_offset is the absolute file offset of data[0]; used by
+ * label overlays to render true file offsets even when a sub-range is shown. */
+void render_byte_class(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
+                       size_t base_offset, size_t file_size);
+void render_hilbert   (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
+                       size_t base_offset, size_t file_size);
+void render_digraph   (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
+                       size_t base_offset, size_t file_size);
+void render_entropy   (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
+                       size_t base_offset, size_t file_size);
+void render_bit_plane (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
+                       size_t base_offset, size_t file_size);
+void render_histogram (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
+                       size_t base_offset, size_t file_size);
+void render_morton    (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
+                       size_t base_offset, size_t file_size);
+void render_polar     (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
+                       size_t base_offset, size_t file_size);
 void render_concentric_rings(uint32_t *pixels, int w, int h,
-                             const uint8_t *data, size_t size);
+                             const uint8_t *data, size_t size,
+                             size_t base_offset, size_t file_size);
 void render_circular_hilbert(uint32_t *pixels, int w, int h,
-                             const uint8_t *data, size_t size);
+                             const uint8_t *data, size_t size,
+                             size_t base_offset, size_t file_size);
 void render_autocorrelation(uint32_t *pixels, int w, int h,
-                            const uint8_t *data, size_t size);
+                            const uint8_t *data, size_t size,
+                            size_t base_offset, size_t file_size);
 void render_strings_density(uint32_t *pixels, int w, int h,
-                            const uint8_t *data, size_t size);
+                            const uint8_t *data, size_t size,
+                            size_t base_offset, size_t file_size);
 void render_self_similarity(uint32_t *pixels, int w, int h,
-                            const uint8_t *data, size_t size);
+                            const uint8_t *data, size_t size,
+                            size_t base_offset, size_t file_size);
 void render_markov_chord   (uint32_t *pixels, int w, int h,
-                            const uint8_t *data, size_t size);
+                            const uint8_t *data, size_t size,
+                            size_t base_offset, size_t file_size);
 void render_rgb_raw        (uint32_t *pixels, int w, int h,
-                            const uint8_t *data, size_t size);
+                            const uint8_t *data, size_t size,
+                            size_t base_offset, size_t file_size);
 
 /* 3D renderers (yaw/pitch in radians) */
 void render_cylindrical(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
+                        size_t base_offset, size_t file_size,
                         float yaw, float pitch, float zoom);
 void render_helical    (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
+                        size_t base_offset, size_t file_size,
                         float yaw, float pitch, float zoom);
 void render_torus      (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
+                        size_t base_offset, size_t file_size,
                         float yaw, float pitch, float zoom);
 void render_trigraph   (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
+                        size_t base_offset, size_t file_size,
                         float yaw, float pitch, float zoom);
 void render_trigraph_spherical(uint32_t *pixels, int w, int h,
                                const uint8_t *data, size_t size,
+                               size_t base_offset, size_t file_size,
                                float yaw, float pitch, float zoom);
 
 #endif
