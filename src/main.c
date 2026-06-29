@@ -18,31 +18,120 @@ const char *view_names[VIEW_COUNT] = {
     "BYTE CLASS STRIPE",
     "HILBERT CURVE",
     "DIGRAPH DOT PLOT",
-    "MARKOV CHORD",
     "ENTROPY HEATMAP",
-    "AUTOCORRELATION",
     "STRINGS DENSITY",
     "SELF-SIMILARITY",
     "BIT-PLANE VIEW",
-    "BYTE HISTOGRAM",
-    "Z-ORDER (MORTON)",
     "RGB RAW",
-    "POLAR SPIRAL",
-    "CONCENTRIC RINGS",
-    "CIRCULAR HILBERT",
-    "CYLINDRICAL 3D",
-    "HELICAL 3D",
-    "TOROIDAL 3D",
     "TRIGRAPH 3D",
     "SPHERICAL TRIGRAPH 3D",
 };
 
+/* Each entry is a NULL-terminated array of lines.  Line 0 is rendered as a
+ * dim subtitle directly below the view title; the remaining lines are the
+ * body.  Avoid characters not present in the bundled 5x7 font. */
+static const char * const desc_byte_class[] = {
+    "ROW-MAJOR. ONE PIXEL = ONE BYTE (OR CHUNK).",
+    "COLOR ENCODES BYTE CATEGORY:",
+    "  0X00 DARK, 0XFF WHITE, WHITESPACE GREEN,",
+    "  CONTROL RED, ASCII BLUE, HIGH-BIT AMBER.",
+    "USE: FAST ORIENTATION. SPOT HEADERS, TEXT",
+    "REGIONS, PADDING, AND CODE AT A GLANCE.",
+    NULL,
+};
+static const char * const desc_hilbert[] = {
+    "BYTES LAID ALONG A 2D HILBERT CURVE.",
+    "BYTES ADJACENT IN THE FILE STAY ADJACENT",
+    "ON SCREEN (LOCALITY PRESERVING).",
+    "USE: SECTION BOUNDARIES APPEAR AS COHERENT",
+    "2D BLOCKS RATHER THAN SMEARED ROWS.",
+    NULL,
+};
+static const char * const desc_digraph[] = {
+    "256X256 MATRIX OF (DATA[I], DATA[I+1])",
+    "TRANSITION COUNTS. LOG-SCALED HEAT COLOR.",
+    "X = NEXT BYTE, Y = CURRENT BYTE.",
+    "USE: FILE-TYPE FINGERPRINT. TEXT, X86, AES,",
+    "JPEG EACH HAVE DISTINCT SIGNATURES.",
+    NULL,
+};
+static const char * const desc_entropy[] = {
+    "FILE SPLIT INTO CHUNKS. PLOT SHANNON",
+    "ENTROPY PER CHUNK (0 TO 8 BITS PER BYTE).",
+    "COLOR: DARK BLUE = LOW, WHITE = MAX.",
+    "USE: LOCATE COMPRESSED, ENCRYPTED, OR",
+    "RANDOM REGIONS VS STRUCTURED DATA.",
+    NULL,
+};
+static const char * const desc_strings_density[] = {
+    "PER-CHUNK FRACTION OF BYTES INSIDE A RUN",
+    "OF >= 4 PRINTABLE ASCII (THE STRINGS RULE).",
+    "COLOR: BLACK TO ORANGE TO WHITE AS DENSITY",
+    "RISES.",
+    "USE: FIND SYMBOL TABLES, MESSAGE BLOBS,",
+    "EMBEDDED CONFIG, USER-FACING TEXT.",
+    NULL,
+};
+static const char * const desc_self_similarity[] = {
+    "SPLIT FILE INTO N CHUNKS. FOR EACH PAIR,",
+    "COMPUTE L1 DISTANCE BETWEEN THEIR 256-BIN",
+    "BYTE-FREQUENCY VECTORS. RENDER THE N X N",
+    "MATRIX. HEAT COLOR: BRIGHT = SIMILAR.",
+    "USE: OFF-DIAGONAL STRIPES REVEAL DUPLICATED",
+    "REGIONS OR REPEATED PAYLOADS.",
+    NULL,
+};
+static const char * const desc_bit_plane[] = {
+    "4X2 GRID OF 8 SUB-IMAGES, ONE PER BIT 0..7.",
+    "EACH PIXEL DRAWS THAT BIT OF THE BYTE",
+    "(WHITE = 1, DARK = 0).",
+    "USE: REVEAL BIT-ALIGNED STRUCTURE INVISIBLE",
+    "TO BYTE-LEVEL VIEWS. LSB STEGANOGRAPHY.",
+    NULL,
+};
+static const char * const desc_rgb_raw[] = {
+    "EACH 3 CONSECUTIVE BYTES = ONE (R, G, B)",
+    "PIXEL. LAID ROW-MAJOR ACROSS THE CANVAS.",
+    "USE: LITERALLY REVEALS EMBEDDED BITMAPS,",
+    "TEXTURES, OR FRAMEBUFFER DUMPS. FOR OTHER",
+    "FILES, THE TEXTURE ITSELF IS A FINGERPRINT.",
+    NULL,
+};
+static const char * const desc_trigraph[] = {
+    "FOR EACH TRIPLE (A, B, C) PLOT A POINT AT",
+    "(A, B, C) IN THE 256X256X256 CUBE.",
+    "PER-PIXEL HIT COUNTS MAPPED TO LOG HEAT.",
+    "USE: 3D VERSION OF THE DIGRAPH. AES FILLS",
+    "THE CUBE UNIFORMLY, TEXT CLUSTERS IN ONE",
+    "CORNER, CODE FORMS STRIATED PLANES.",
+    NULL,
+};
+static const char * const desc_trigraph_spherical[] = {
+    "SAME TRIPLES AS THE CUBE TRIGRAPH BUT READ",
+    "AS SPHERICAL COORDS: THETA = A, PHI = B,",
+    "R = C / 255. VELES-STYLE PROJECTION.",
+    "USE: BIAS IN ANY BYTE POSITION FORMS",
+    "VISIBLE SHELLS OR CLUSTERS. ALTERNATIVE",
+    "GEOMETRIC READING OF 3-GRAM STRUCTURE.",
+    NULL,
+};
+
+const char * const *view_descriptions[VIEW_COUNT] = {
+    desc_byte_class,
+    desc_hilbert,
+    desc_digraph,
+    desc_entropy,
+    desc_strings_density,
+    desc_self_similarity,
+    desc_bit_plane,
+    desc_rgb_raw,
+    desc_trigraph,
+    desc_trigraph_spherical,
+};
+
 bool view_is_3d(view_id_t v)
 {
-    return v == VIEW_CYLINDRICAL
-        || v == VIEW_HELICAL
-        || v == VIEW_TORUS
-        || v == VIEW_TRIGRAPH
+    return v == VIEW_TRIGRAPH
         || v == VIEW_TRIGRAPH_SPHERICAL;
 }
 
@@ -53,6 +142,7 @@ static const struct {
     {"TAB",     "NEXT VIEW"},
     {"SHF-TAB", "PREV VIEW"},
     {"L",       "TOGGLE LEGEND"},
+    {"D",       "VIEW DESCRIPTION"},
     {"A",       "AUTO-ROTATE (3D)"},
     {"ARROWS",  "ROTATE (3D)"},
     {"+/-/WHL", "ZOOM (3D)"},
@@ -129,31 +219,13 @@ static SDL_Texture *ensure_view_texture(binmap_app_t *app, view_id_t view, int c
     case VIEW_BYTE_CLASS:  render_byte_class(pixels, cw, ch, d, s, bo, fs); break;
     case VIEW_HILBERT:     render_hilbert   (pixels, cw, ch, d, s, bo, fs); break;
     case VIEW_DIGRAPH:     render_digraph   (pixels, cw, ch, d, s, bo, fs); break;
-    case VIEW_MARKOV_CHORD:
-        render_markov_chord(pixels, cw, ch, d, s, bo, fs); break;
     case VIEW_ENTROPY:     render_entropy   (pixels, cw, ch, d, s, bo, fs); break;
-    case VIEW_AUTOCORRELATION:
-        render_autocorrelation(pixels, cw, ch, d, s, bo, fs); break;
     case VIEW_STRINGS_DENSITY:
         render_strings_density(pixels, cw, ch, d, s, bo, fs); break;
     case VIEW_SELF_SIMILARITY:
         render_self_similarity(pixels, cw, ch, d, s, bo, fs); break;
     case VIEW_BIT_PLANE:   render_bit_plane (pixels, cw, ch, d, s, bo, fs); break;
-    case VIEW_HISTOGRAM:   render_histogram (pixels, cw, ch, d, s, bo, fs); break;
-    case VIEW_MORTON:      render_morton    (pixels, cw, ch, d, s, bo, fs); break;
-    case VIEW_RGB_RAW:
-        render_rgb_raw    (pixels, cw, ch, d, s, bo, fs); break;
-    case VIEW_POLAR:       render_polar     (pixels, cw, ch, d, s, bo, fs); break;
-    case VIEW_CONCENTRIC_RINGS:
-        render_concentric_rings(pixels, cw, ch, d, s, bo, fs); break;
-    case VIEW_CIRCULAR_HILBERT:
-        render_circular_hilbert(pixels, cw, ch, d, s, bo, fs); break;
-    case VIEW_CYLINDRICAL: render_cylindrical(pixels, cw, ch, d, s, bo, fs,
-                                              app->yaw, app->pitch, app->zoom); break;
-    case VIEW_HELICAL:     render_helical   (pixels, cw, ch, d, s, bo, fs,
-                                             app->yaw, app->pitch, app->zoom); break;
-    case VIEW_TORUS:       render_torus     (pixels, cw, ch, d, s, bo, fs,
-                                             app->yaw, app->pitch, app->zoom); break;
+    case VIEW_RGB_RAW:     render_rgb_raw   (pixels, cw, ch, d, s, bo, fs); break;
     case VIEW_TRIGRAPH:    render_trigraph  (pixels, cw, ch, d, s, bo, fs,
                                              app->yaw, app->pitch, app->zoom); break;
     case VIEW_TRIGRAPH_SPHERICAL:
@@ -483,6 +555,76 @@ static void draw_legend(binmap_app_t *app)
     }
 }
 
+static void draw_description(binmap_app_t *app)
+{
+    if (!app->show_description) return;
+    const char * const *lines = view_descriptions[app->current_view];
+    if (!lines) return;
+
+    int title_scale = 2;
+    int body_scale  = 2;
+    int title_h     = FONT_H * title_scale;
+    int line_h      = (FONT_H + 3) * body_scale;
+    int pad         = 14;
+    int gap         = 8;
+
+    int body_w = 0;
+    int body_n = 0;
+    for (const char * const *p = lines; *p; p++) {
+        int lw = text_width(body_scale, *p);
+        if (lw > body_w) body_w = lw;
+        body_n++;
+    }
+
+    const char *title = view_names[app->current_view];
+    int title_w = text_width(title_scale, title);
+    int hint_scale = 1;
+    const char *hint = "PRESS D TO DISMISS";
+    int hint_w = text_width(hint_scale, hint);
+    int hint_h = FONT_H * hint_scale;
+
+    int content_w = body_w;
+    if (title_w  > content_w) content_w = title_w;
+    if (hint_w   > content_w) content_w = hint_w;
+
+    int content_h = title_h + gap + body_n * line_h + gap + hint_h;
+    int box_w = content_w + pad * 2;
+    int box_h = content_h + pad * 2;
+
+    int canvas_top = STATUS_BAR_H;
+    int canvas_bot = app->win_h - SLIDER_BAR_H;
+    int canvas_h   = canvas_bot - canvas_top;
+    if (box_h > canvas_h - 8) box_h = canvas_h - 8;
+    if (box_w > app->win_w - 16) box_w = app->win_w - 16;
+    int x0 = (app->win_w - box_w) / 2;
+    int y0 = canvas_top + (canvas_h - box_h) / 2;
+
+    SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+    SDL_FRect bg = {(float)x0, (float)y0, (float)box_w, (float)box_h};
+    SDL_SetRenderDrawColor(app->renderer, 18, 18, 24, 235);
+    SDL_RenderFillRect(app->renderer, &bg);
+    SDL_SetRenderDrawColor(app->renderer, 90, 90, 115, 255);
+    SDL_RenderRect(app->renderer, &bg);
+
+    SDL_Color title_col = {255, 200, 100, 255};
+    SDL_Color body_col  = {220, 220, 235, 255};
+    SDL_Color hint_col  = {150, 150, 165, 255};
+
+    int y = y0 + pad;
+    int content_x = x0 + pad;
+    draw_text(app->renderer, content_x, y, title_scale, title_col, title);
+    y += title_h + gap;
+
+    for (const char * const *p = lines; *p; p++) {
+        draw_text(app->renderer, content_x, y, body_scale, body_col, *p);
+        y += line_h;
+    }
+
+    int hint_x = x0 + box_w - pad - hint_w;
+    int hint_y = y0 + box_h - pad - hint_h;
+    draw_text(app->renderer, hint_x, hint_y, hint_scale, hint_col, hint);
+}
+
 static void redraw(binmap_app_t *app)
 {
     SDL_SetRenderDrawColor(app->renderer, 10, 10, 12, 255);
@@ -500,6 +642,7 @@ static void redraw(binmap_app_t *app)
 
     draw_status_bar(app);
     draw_legend(app);
+    draw_description(app);
     draw_range_slider(app);
     SDL_RenderPresent(app->renderer);
 }
@@ -507,6 +650,7 @@ static void redraw(binmap_app_t *app)
 static void switch_view(binmap_app_t *app, view_id_t v)
 {
     app->current_view = v;
+    app->show_description = false;
     app->needs_redraw = true;
 }
 
@@ -707,6 +851,10 @@ static void handle_key(binmap_app_t *app, SDL_Keycode k, SDL_Keymod mod, bool *r
         app->show_legend = !app->show_legend;
         app->needs_redraw = true;
         break;
+    case SDLK_D:
+        app->show_description = !app->show_description;
+        app->needs_redraw = true;
+        break;
     case SDLK_A:
         if (view_is_3d(app->current_view)) {
             app->auto_rotate = !app->auto_rotate;
@@ -741,6 +889,7 @@ int main(int argc, char **argv)
             "binmap - binary visualization tool\n"
             "  TAB / SHIFT+TAB  next / previous view\n"
             "  L                toggle legend\n"
+            "  D                toggle view description\n"
             "  A                toggle auto-rotate (3D views)\n"
             "  ARROWS           rotate (3D views)\n"
             "  + / - / WHEEL    zoom (3D views)\n"
@@ -775,6 +924,7 @@ int main(int argc, char **argv)
     SDL_SetRenderVSync(app.renderer, 1);
 
     app.show_legend = true;
+    app.show_description = false;
     app.current_view = VIEW_BYTE_CLASS;
     app.needs_redraw = true;
     app.yaw = 0.6f;
