@@ -66,9 +66,92 @@ static uint32_t heat_color(double t)
     return rgb(clamp_u8(r), clamp_u8(g), clamp_u8(b));
 }
 
+/* ---------- label / overlay helpers ---------- */
+
+#define OVERLAY_LABEL_COLOR rgb(220, 220, 235)
+#define OVERLAY_TICK_COLOR  rgb(140, 140, 165)
+#define OVERLAY_DIM_COLOR   rgb(150, 150, 170)
+#define OVERLAY_GRID_COLOR  rgb(50, 50, 70)
+#define OVERLAY_TITLE_COLOR rgb(255, 200, 100)
+
+static void format_hex_offset(char *buf, size_t bufsz, size_t off, size_t file_size)
+{
+    int digits;
+    if      (file_size <= 0xFFFFul)         digits = 4;
+    else if (file_size <= 0xFFFFFFul)       digits = 6;
+    else if (file_size <= 0xFFFFFFFFul)     digits = 8;
+    else                                    digits = 12;
+    snprintf(buf, bufsz, "0X%0*zX", digits, off);
+}
+
+static void draw_hline(uint32_t *pixels, int w, int h, int x0, int x1, int y, uint32_t color)
+{
+    if (y < 0 || y >= h) return;
+    if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+    if (x0 < 0) x0 = 0;
+    if (x1 >= w) x1 = w - 1;
+    uint32_t *row = pixels + (size_t)y * (size_t)w;
+    for (int x = x0; x <= x1; x++) row[x] = color;
+}
+
+static void draw_vline(uint32_t *pixels, int w, int h, int x, int y0, int y1, uint32_t color)
+{
+    if (x < 0 || x >= w) return;
+    if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+    if (y0 < 0) y0 = 0;
+    if (y1 >= h) y1 = h - 1;
+    for (int y = y0; y <= y1; y++) pixels[(size_t)y * (size_t)w + (size_t)x] = color;
+}
+
+/* Right-edge offset rail used by row-major views (byte-class, entropy,
+ * strings density, RGB-raw). Draws 5 ticks (0/25/50/75/100%) labeled with
+ * absolute file offsets. y_top..y_bot is the vertical span the data covers. */
+static void draw_offset_rail_right(uint32_t *pixels, int w, int h,
+                                   int x_edge, int y_top, int y_bot,
+                                   size_t base, size_t span, size_t file_size)
+{
+    if (y_bot <= y_top) return;
+    int tick_len = 6;
+    int label_pad = 3;
+    int scale = 1;
+    int label_h = FONT_H * scale;
+    for (int q = 0; q <= 4; q++) {
+        size_t off = base + (size_t)((double)q * 0.25 * (double)span);
+        if (q == 4) off = base + span;
+        int y = y_top + (q * (y_bot - y_top)) / 4;
+        if (y < 0 || y >= h) continue;
+        draw_hline(pixels, w, h, x_edge - tick_len, x_edge - 1, y, OVERLAY_TICK_COLOR);
+        char buf[32];
+        format_hex_offset(buf, sizeof(buf), off, file_size);
+        int tw = text_width(scale, buf);
+        int tx = x_edge - tick_len - label_pad - tw;
+        if (tx < 2) tx = 2;
+        int ty = y - label_h / 2;
+        if (ty < 0) ty = 0;
+        if (ty + label_h >= h) ty = h - label_h - 1;
+        /* faint shadow background so text reads over any palette */
+        for (int by = ty - 1; by < ty + label_h + 1; by++) {
+            for (int bx = tx - 1; bx < tx + tw + 1; bx++) {
+                if (bx < 0 || bx >= w || by < 0 || by >= h) continue;
+                uint32_t *p = &pixels[by * w + bx];
+                uint32_t c = *p;
+                uint8_t r = (uint8_t)((c >> 16) & 0xFF);
+                uint8_t g = (uint8_t)((c >> 8)  & 0xFF);
+                uint8_t b = (uint8_t)( c        & 0xFF);
+                r = (uint8_t)(r / 3);
+                g = (uint8_t)(g / 3);
+                b = (uint8_t)(b / 3);
+                *p = rgb(r, g, b);
+            }
+        }
+        blit_text(pixels, w, h, tx, ty, scale, OVERLAY_LABEL_COLOR, buf);
+    }
+}
+
 /* ---------- Byte-class stripe ---------- */
 
-void render_byte_class(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size)
+void render_byte_class(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
+                       size_t base_offset, size_t file_size)
 {
     const uint32_t bg = rgb(15, 15, 20);
     uint64_t total = (uint64_t)w * (uint64_t)h;
@@ -77,6 +160,11 @@ void render_byte_class(uint32_t *pixels, int w, int h, const uint8_t *data, size
         uint64_t bi = (i * size) / total;
         if (bi >= size) { pixels[i] = bg; continue; }
         pixels[i] = byte_class_color(data[bi]);
+    }
+    /* offset rail is meaningless on the 1-pixel-tall minimap strip */
+    if (h >= 32) {
+        draw_offset_rail_right(pixels, w, h, w - 2, 2, h - 2,
+                               base_offset, size, file_size);
     }
 }
 
@@ -115,8 +203,39 @@ static uint32_t curve_color(uint8_t b)
     return rgb(180 + v / 4, 140 + v / 4, 40 + v / 4);
 }
 
+static void draw_corner_label(uint32_t *pixels, int w, int h,
+                              int cx, int cy, int img_x0, int img_y0, int img_size,
+                              size_t off, size_t file_size)
+{
+    char buf[32];
+    format_hex_offset(buf, sizeof(buf), off, file_size);
+    int scale = 1;
+    int tw = text_width(scale, buf);
+    int th = FONT_H * scale;
+    int x, y;
+    /* place label just inside the corner, opposite to its (cx,cy) extremes */
+    if (cx == 0) x = img_x0 + 2;
+    else         x = img_x0 + img_size - tw - 2;
+    if (cy == 0) y = img_y0 + 2;
+    else         y = img_y0 + img_size - th - 2;
+    /* shadow */
+    for (int by = y - 1; by < y + th + 1; by++) {
+        for (int bx = x - 1; bx < x + tw + 1; bx++) {
+            if (bx < 0 || bx >= w || by < 0 || by >= h) continue;
+            uint32_t *p = &pixels[by * w + bx];
+            uint32_t c = *p;
+            uint8_t rr = (uint8_t)(((c >> 16) & 0xFF) / 3);
+            uint8_t gg = (uint8_t)(((c >> 8)  & 0xFF) / 3);
+            uint8_t bb = (uint8_t)(( c        & 0xFF) / 3);
+            *p = rgb(rr, gg, bb);
+        }
+    }
+    blit_text(pixels, w, h, x, y, scale, OVERLAY_LABEL_COLOR, buf);
+}
+
 static void render_curve(uint32_t *pixels, int w, int h,
                          const uint8_t *data, size_t size,
+                         size_t base_offset, size_t file_size,
                          void (*d2xy)(int, int, int *, int *))
 {
     const uint32_t bg = rgb(8, 8, 12);
@@ -137,9 +256,21 @@ static void render_curve(uint32_t *pixels, int w, int h,
     uint64_t bpc = (size + total_cells - 1) / total_cells;
     if (bpc < 1) bpc = 1;
 
+    /* track which d-value lands at each of the 4 corners */
+    uint64_t corner_d[2][2] = {{0,0},{0,0}};
+    bool corner_found[2][2] = {{false,false},{false,false}};
+
     for (uint64_t d = 0; d < total_cells; d++) {
         int cx, cy;
         d2xy(n, (int)d, &cx, &cy);
+        if ((cx == 0 || cx == n - 1) && (cy == 0 || cy == n - 1)) {
+            int ix = (cx == 0) ? 0 : 1;
+            int iy = (cy == 0) ? 0 : 1;
+            if (!corner_found[iy][ix]) {
+                corner_d[iy][ix] = d;
+                corner_found[iy][ix] = true;
+            }
+        }
         uint64_t bs = d * bpc;
         if (bs >= size) continue;
         uint64_t be = bs + bpc;
@@ -156,17 +287,31 @@ static void render_curve(uint32_t *pixels, int w, int h,
             for (int dx = 0; dx < cell; dx++) row[dx] = color;
         }
     }
+
+    /* corner offset labels */
+    for (int iy = 0; iy < 2; iy++) {
+        for (int ix = 0; ix < 2; ix++) {
+            if (!corner_found[iy][ix]) continue;
+            uint64_t d = corner_d[iy][ix];
+            size_t off = base_offset + (size_t)(d * bpc);
+            if (off > base_offset + size) off = base_offset + size;
+            draw_corner_label(pixels, w, h, ix, iy, ox, oy, img, off, file_size);
+        }
+    }
 }
 
-void render_hilbert(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size)
+void render_hilbert(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
+                    size_t base_offset, size_t file_size)
 {
-    render_curve(pixels, w, h, data, size, d2xy_hilbert);
+    render_curve(pixels, w, h, data, size, base_offset, file_size, d2xy_hilbert);
 }
 
 /* ---------- Digraph dot plot ---------- */
 
-void render_digraph(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size)
+void render_digraph(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
+                    size_t base_offset, size_t file_size)
 {
+    (void)base_offset; (void)file_size;
     const uint32_t bg = rgb(5, 5, 10);
     fill(pixels, w, h, bg);
     if (size < 2) return;
@@ -190,6 +335,14 @@ void render_digraph(uint32_t *pixels, int w, int h, const uint8_t *data, size_t 
     double log_max = log((double)max_count + 1.0);
     if (log_max < 1e-9) log_max = 1.0;
 
+    /* faint grid every 0x10 = 16 byte values, drawn beneath the dots */
+    for (int g = 16; g < 256; g += 16) {
+        int gx = ox + g * cell;
+        int gy = oy + g * cell;
+        if (gx >= 0 && gx < w) draw_vline(pixels, w, h, gx, oy, oy + img - 1, OVERLAY_GRID_COLOR);
+        if (gy >= 0 && gy < h) draw_hline(pixels, w, h, ox, ox + img - 1, gy, OVERLAY_GRID_COLOR);
+    }
+
     for (int y = 0; y < 256; y++) {
         for (int x = 0; x < 256; x++) {
             uint32_t c = counts[y * 256 + x];
@@ -204,6 +357,38 @@ void render_digraph(uint32_t *pixels, int w, int h, const uint8_t *data, size_t 
             }
         }
     }
+
+    /* axis title + edge labels at every 0x20 along both axes */
+    int scale = 1;
+    int label_h = FONT_H * scale;
+    static const int ticks[] = {0x00, 0x20, 0x40, 0x60, 0x80, 0xA0, 0xC0, 0xE0, 0xFF};
+    for (size_t i = 0; i < sizeof(ticks) / sizeof(ticks[0]); i++) {
+        int v = ticks[i];
+        int gx = ox + v * cell;
+        int gy = oy + v * cell;
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%02X", v);
+        int tw = text_width(scale, buf);
+        /* X axis (top edge) — labels above */
+        int lx = gx - tw / 2;
+        int ly = oy - label_h - 2;
+        if (ly < 0) ly = 0;
+        if (lx < 0) lx = 0;
+        blit_text(pixels, w, h, lx, ly, scale, OVERLAY_DIM_COLOR, buf);
+        /* Y axis (left edge) — labels to the left */
+        int ly2 = gy - label_h / 2;
+        int lx2 = ox - tw - 4;
+        if (lx2 < 0) lx2 = 0;
+        if (ly2 < 0) ly2 = 0;
+        if (ly2 + label_h >= h) ly2 = h - label_h - 1;
+        blit_text(pixels, w, h, lx2, ly2, scale, OVERLAY_DIM_COLOR, buf);
+        /* tick marks on the axes */
+        if (gx >= 0 && gx < w) draw_vline(pixels, w, h, gx, oy - 3, oy - 1, OVERLAY_TICK_COLOR);
+        if (gy >= 0 && gy < h) draw_hline(pixels, w, h, ox - 3, ox - 1, gy, OVERLAY_TICK_COLOR);
+    }
+
+    blit_text(pixels, w, h, ox, oy - label_h - 14, 2, OVERLAY_TITLE_COLOR,
+              "DIGRAPH  X=BYTE[I+1]  Y=BYTE[I]");
 }
 
 /* ---------- Entropy heatmap ---------- */
@@ -237,7 +422,8 @@ static uint32_t entropy_color(double e)
     return rgb(clamp_u8(r), clamp_u8(g), clamp_u8(b));
 }
 
-void render_entropy(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size)
+void render_entropy(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
+                    size_t base_offset, size_t file_size)
 {
     const uint32_t bg = rgb(8, 8, 12);
     uint64_t total_px = (uint64_t)w * (uint64_t)h;
@@ -272,12 +458,18 @@ void render_entropy(uint32_t *pixels, int w, int h, const uint8_t *data, size_t 
         pixels[i] = entropy_color(e[ci]);
     }
     free(e);
+
+    if (h >= 32) {
+        draw_offset_rail_right(pixels, w, h, w - 2, 2, h - 2,
+                               base_offset, size, file_size);
+    }
 }
 
 /* ---------- Bit-plane view ----------
  * 8 sub-images in a 4x2 grid, one per bit position. */
 
-void render_bit_plane(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size)
+void render_bit_plane(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
+                      size_t base_offset, size_t file_size)
 {
     const uint32_t bg     = rgb(15, 15, 20);
     const uint32_t border = rgb(60, 60, 75);
@@ -330,6 +522,20 @@ void render_bit_plane(uint32_t *pixels, int w, int h, const uint8_t *data, size_
         char label[16];
         snprintf(label, sizeof(label), "BIT %d", bit);
         blit_text(pixels, w, h, x0 + 2, y0 + sh + 4, 2, rgb(255, 200, 100), label);
+
+        /* corner offsets on the first panel only — applies to all panels */
+        if (bit == 0) {
+            char start_buf[32], end_buf[32];
+            format_hex_offset(start_buf, sizeof(start_buf), base_offset, file_size);
+            format_hex_offset(end_buf,   sizeof(end_buf),   base_offset + size, file_size);
+            blit_text(pixels, w, h, x0 + 2, y0 + 2, 1, OVERLAY_LABEL_COLOR, start_buf);
+            int ew = text_width(1, end_buf);
+            int ex = x0 + sw - ew - 2;
+            int ey = y0 + sh - FONT_H - 2;
+            if (ex < x0 + 2) ex = x0 + 2;
+            if (ey < y0 + 2) ey = y0 + 2;
+            blit_text(pixels, w, h, ex, ey, 1, OVERLAY_LABEL_COLOR, end_buf);
+        }
     }
 }
 
@@ -340,7 +546,8 @@ void render_bit_plane(uint32_t *pixels, int w, int h, const uint8_t *data, size_
 static inline bool is_printable(uint8_t b) { return b >= 0x20 && b < 0x7F; }
 
 void render_strings_density(uint32_t *pixels, int w, int h,
-                            const uint8_t *data, size_t size)
+                            const uint8_t *data, size_t size,
+                            size_t base_offset, size_t file_size)
 {
     const uint32_t bg = rgb(8, 8, 14);
     fill(pixels, w, h, bg);
@@ -393,6 +600,11 @@ void render_strings_density(uint32_t *pixels, int w, int h,
     }
     free(density);
 
+    if (h >= 32) {
+        draw_offset_rail_right(pixels, w, h, w - 2, 2, h - 2,
+                               base_offset, size, file_size);
+    }
+
     blit_text(pixels, w, h, 8, 4, 2, rgb(255, 200, 100),
               "STRINGS DENSITY (ASCII RUNS >= 4)");
 }
@@ -403,7 +615,8 @@ void render_strings_density(uint32_t *pixels, int w, int h,
  * Repeated regions appear as off-diagonal stripes / blocks. */
 
 void render_self_similarity(uint32_t *pixels, int w, int h,
-                            const uint8_t *data, size_t size)
+                            const uint8_t *data, size_t size,
+                            size_t base_offset, size_t file_size)
 {
     const uint32_t bg = rgb(8, 8, 14);
     fill(pixels, w, h, bg);
@@ -469,19 +682,46 @@ void render_self_similarity(uint32_t *pixels, int w, int h,
     free(dist);
     free(hists);
 
-    /* corner labels */
+    /* title + offset ticks on top (x axis) and left (y axis) */
     blit_text(pixels, w, h, ox, oy - FONT_H * 2 - 6, 2, rgb(255, 200, 100),
               "SELF-SIMILARITY (HISTOGRAM L1 DISTANCE)");
-    blit_text(pixels, w, h, ox, oy + img + 6, 2, rgb(180, 180, 200), "0");
-    blit_text(pixels, w, h, ox + img - text_width(2, "EOF"),
-              oy + img + 6, 2, rgb(180, 180, 200), "EOF");
+
+    int scale = 1;
+    int th = FONT_H * scale;
+    for (int q = 0; q <= 4; q++) {
+        size_t off = base_offset + (size_t)((double)q * 0.25 * (double)size);
+        if (q == 4) off = base_offset + size;
+        char buf[32];
+        format_hex_offset(buf, sizeof(buf), off, file_size);
+        int tw = text_width(scale, buf);
+        int pos = (q * img) / 4;
+        /* x axis labels along bottom edge */
+        int bx = ox + pos - tw / 2;
+        int by = oy + img + 4;
+        if (bx < 0) bx = 0;
+        if (bx + tw >= w) bx = w - tw - 1;
+        blit_text(pixels, w, h, bx, by, scale, OVERLAY_LABEL_COLOR, buf);
+        /* y axis labels along left edge */
+        int ly = oy + pos - th / 2;
+        int lx = ox - tw - 4;
+        if (lx < 0) lx = 0;
+        if (ly < 0) ly = 0;
+        if (ly + th >= h) ly = h - th - 1;
+        blit_text(pixels, w, h, lx, ly, scale, OVERLAY_LABEL_COLOR, buf);
+        /* matrix-edge tick marks */
+        if (ox + pos >= 0 && ox + pos < w)
+            draw_vline(pixels, w, h, ox + pos, oy + img, oy + img + 3, OVERLAY_TICK_COLOR);
+        if (oy + pos >= 0 && oy + pos < h)
+            draw_hline(pixels, w, h, ox - 3, ox - 1, oy + pos, OVERLAY_TICK_COLOR);
+    }
 }
 
 /* ---------- RGB raw view ----------
  * Each pixel = one (R, G, B) triple of consecutive bytes.
  * Files containing embedded bitmaps (raw textures, dumps) literally show up. */
 
-void render_rgb_raw(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size)
+void render_rgb_raw(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
+                    size_t base_offset, size_t file_size)
 {
     const uint32_t bg = rgb(8, 8, 14);
     fill(pixels, w, h, bg);
@@ -496,6 +736,11 @@ void render_rgb_raw(uint32_t *pixels, int w, int h, const uint8_t *data, size_t 
         if (ti >= n_triples) { pixels[i] = bg; continue; }
         size_t off = ti * 3;
         pixels[i] = rgb(data[off], data[off + 1], data[off + 2]);
+    }
+
+    if (h >= 32) {
+        draw_offset_rail_right(pixels, w, h, w - 2, 2, h - 2,
+                               base_offset, size, file_size);
     }
 
     blit_text(pixels, w, h, 8, 4, 2, rgb(255, 200, 100),
@@ -545,8 +790,10 @@ static void draw_line_pix(uint32_t *pixels, int w, int h,
 /* ---------- 3D trigraph point cloud ---------- */
 
 void render_trigraph(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
+                     size_t base_offset, size_t file_size,
                      float yaw, float pitch, float zoom)
 {
+    (void)base_offset; (void)file_size;
     const uint32_t bg = rgb(4, 4, 10);
     fill(pixels, w, h, bg);
     if (size < 3 || w < 16 || h < 16) return;
@@ -615,6 +862,28 @@ void render_trigraph(uint32_t *pixels, int w, int h, const uint8_t *data, size_t
     }
     free(counts);
 
+    /* label each visible cube corner with its (a,b,c) value */
+    for (int i = 0; i < 8; i++) {
+        if (!ok[i]) continue;
+        int a = (cv[i][0] < 0) ? 0x00 : 0xFF;
+        int b = (cv[i][1] < 0) ? 0x00 : 0xFF;
+        int c = (cv[i][2] < 0) ? 0x00 : 0xFF;
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%02X,%02X,%02X", a, b, c);
+        int scale = 1;
+        int tw = text_width(scale, buf);
+        int th = FONT_H * scale;
+        int lx = (int)pv[i][0] + 4;
+        int ly = (int)pv[i][1] - th - 2;
+        if (lx + tw >= w) lx = (int)pv[i][0] - tw - 4;
+        if (ly < 0)       ly = (int)pv[i][1] + 4;
+        if (lx < 0) lx = 0;
+        if (ly < 0) ly = 0;
+        if (lx + tw >= w) lx = w - tw - 1;
+        if (ly + th >= h) ly = h - th - 1;
+        blit_text(pixels, w, h, lx, ly, scale, OVERLAY_LABEL_COLOR, buf);
+    }
+
     blit_text(pixels, w, h, 8, 4, 2, rgb(255, 200, 100),
               "TRIGRAPH (BYTE TRIPLES IN 0..255 CUBE)");
 }
@@ -629,8 +898,10 @@ void render_trigraph(uint32_t *pixels, int w, int h, const uint8_t *data, size_t
 
 void render_trigraph_spherical(uint32_t *pixels, int w, int h,
                                const uint8_t *data, size_t size,
+                               size_t base_offset, size_t file_size,
                                float yaw, float pitch, float zoom)
 {
+    (void)base_offset; (void)file_size;
     const uint32_t bg = rgb(4, 4, 10);
     fill(pixels, w, h, bg);
     if (size < 3 || w < 16 || h < 16) return;
@@ -728,8 +999,34 @@ void render_trigraph_spherical(uint32_t *pixels, int w, int h,
     }
     free(counts);
 
+    /* anchor labels at sphere axes */
+    {
+        struct { float x, y, z; const char *label; } anchors[] = {
+            { 1.0f,  0.0f,  0.0f, "A=0X00" },   /* theta=0    */
+            {-1.0f,  0.0f,  0.0f, "A=0X80" },   /* theta=pi   */
+            { 0.0f,  1.0f,  0.0f, "B=0X00" },   /* phi=0      */
+            { 0.0f, -1.0f,  0.0f, "B=0XFF" },   /* phi=pi     */
+            { 0.0f,  0.0f,  1.0f, "C=0XFF" },   /* rim r=1    */
+        };
+        for (size_t k = 0; k < sizeof(anchors) / sizeof(anchors[0]); k++) {
+            float sxp, syp;
+            if (!project_pt(anchors[k].x, anchors[k].y, anchors[k].z,
+                            cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp))
+                continue;
+            int scale = 1;
+            int tw = text_width(scale, anchors[k].label);
+            int th = FONT_H * scale;
+            int lx = (int)sxp + 4;
+            int ly = (int)syp - th / 2;
+            if (lx + tw >= w) lx = (int)sxp - tw - 4;
+            if (lx < 0) lx = 0;
+            if (ly < 0) ly = 0;
+            if (lx + tw >= w) lx = w - tw - 1;
+            if (ly + th >= h) ly = h - th - 1;
+            blit_text(pixels, w, h, lx, ly, scale, OVERLAY_LABEL_COLOR, anchors[k].label);
+        }
+    }
+
     blit_text(pixels, w, h, 8, 4, 2, rgb(255, 200, 100),
               "SPHERICAL TRIGRAPH (THETA=A PHI=B R=C)");
 }
-
-
