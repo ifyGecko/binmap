@@ -18,31 +18,18 @@ const char *view_names[VIEW_COUNT] = {
     "BYTE CLASS STRIPE",
     "HILBERT CURVE",
     "DIGRAPH DOT PLOT",
-    "MARKOV CHORD",
     "ENTROPY HEATMAP",
-    "AUTOCORRELATION",
     "STRINGS DENSITY",
     "SELF-SIMILARITY",
     "BIT-PLANE VIEW",
-    "BYTE HISTOGRAM",
-    "Z-ORDER (MORTON)",
     "RGB RAW",
-    "POLAR SPIRAL",
-    "CONCENTRIC RINGS",
-    "CIRCULAR HILBERT",
-    "CYLINDRICAL 3D",
-    "HELICAL 3D",
-    "TOROIDAL 3D",
     "TRIGRAPH 3D",
     "SPHERICAL TRIGRAPH 3D",
 };
 
 bool view_is_3d(view_id_t v)
 {
-    return v == VIEW_CYLINDRICAL
-        || v == VIEW_HELICAL
-        || v == VIEW_TORUS
-        || v == VIEW_TRIGRAPH
+    return v == VIEW_TRIGRAPH
         || v == VIEW_TRIGRAPH_SPHERICAL;
 }
 
@@ -127,31 +114,13 @@ static SDL_Texture *ensure_view_texture(binmap_app_t *app, view_id_t view, int c
     case VIEW_BYTE_CLASS:  render_byte_class(pixels, cw, ch, d, s); break;
     case VIEW_HILBERT:     render_hilbert   (pixels, cw, ch, d, s); break;
     case VIEW_DIGRAPH:     render_digraph   (pixels, cw, ch, d, s); break;
-    case VIEW_MARKOV_CHORD:
-        render_markov_chord(pixels, cw, ch, d, s); break;
     case VIEW_ENTROPY:     render_entropy   (pixels, cw, ch, d, s); break;
-    case VIEW_AUTOCORRELATION:
-        render_autocorrelation(pixels, cw, ch, d, s); break;
     case VIEW_STRINGS_DENSITY:
         render_strings_density(pixels, cw, ch, d, s); break;
     case VIEW_SELF_SIMILARITY:
         render_self_similarity(pixels, cw, ch, d, s); break;
     case VIEW_BIT_PLANE:   render_bit_plane (pixels, cw, ch, d, s); break;
-    case VIEW_HISTOGRAM:   render_histogram (pixels, cw, ch, d, s); break;
-    case VIEW_MORTON:      render_morton    (pixels, cw, ch, d, s); break;
-    case VIEW_RGB_RAW:
-        render_rgb_raw    (pixels, cw, ch, d, s); break;
-    case VIEW_POLAR:       render_polar     (pixels, cw, ch, d, s); break;
-    case VIEW_CONCENTRIC_RINGS:
-        render_concentric_rings(pixels, cw, ch, d, s); break;
-    case VIEW_CIRCULAR_HILBERT:
-        render_circular_hilbert(pixels, cw, ch, d, s); break;
-    case VIEW_CYLINDRICAL: render_cylindrical(pixels, cw, ch, d, s,
-                                              app->yaw, app->pitch, app->zoom); break;
-    case VIEW_HELICAL:     render_helical   (pixels, cw, ch, d, s,
-                                             app->yaw, app->pitch, app->zoom); break;
-    case VIEW_TORUS:       render_torus     (pixels, cw, ch, d, s,
-                                             app->yaw, app->pitch, app->zoom); break;
+    case VIEW_RGB_RAW:     render_rgb_raw   (pixels, cw, ch, d, s); break;
     case VIEW_TRIGRAPH:    render_trigraph  (pixels, cw, ch, d, s,
                                              app->yaw, app->pitch, app->zoom); break;
     case VIEW_TRIGRAPH_SPHERICAL:
