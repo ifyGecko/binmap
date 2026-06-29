@@ -1526,29 +1526,21 @@ void render_cylindrical(uint32_t *pixels, int w, int h, const uint8_t *data, siz
         sin_tbl[t] = sinf(a);
     }
 
-    size_t step = 1;
-    size_t cap = 400000;
-    if (size > cap) step = size / cap;
+    /* dense wireframe: parallels (horizontal rings) + meridians (vertical lines)
+     * drawn first so byte-class data lines paint on top. */
+    const int n_parallels = 8;
+    const int n_meridians = 24;
+    uint32_t ring_edge_col = rgb(80, 80, 110);
+    uint32_t ring_mid_col  = rgb(45, 45, 65);
+    uint32_t meridian_col  = rgb(50, 50, 75);
 
-    for (size_t i = 0; i < size; i += step) {
-        int  ti = (int)(i & 0xFF);
-        float yy = ((float)i / (float)size - 0.5f) * height;
-        float xx = cos_tbl[ti] * radius;
-        float zz = sin_tbl[ti] * radius;
-        float sxp, syp;
-        if (!project_pt(xx, yy, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) continue;
-        int px = (int)sxp, py = (int)syp;
-        if (px < 0 || px >= w || py < 0 || py >= h) continue;
-        pixels[py * w + px] = byte_class_color(data[i]);
-    }
-
-    /* axis hint: top + bottom rings */
-    uint32_t ring = rgb(80, 80, 110);
-    float prev_x = 0, prev_y = 0;
-    bool have_prev;
-    for (int ring_i = 0; ring_i < 2; ring_i++) {
-        float ry = (ring_i == 0) ? -height * 0.5f : height * 0.5f;
-        have_prev = false;
+    for (int ring_i = 0; ring_i < n_parallels; ring_i++) {
+        float tr = (n_parallels > 1) ? (float)ring_i / (float)(n_parallels - 1) : 0.5f;
+        float ry = (tr - 0.5f) * height;
+        bool edge = (ring_i == 0 || ring_i == n_parallels - 1);
+        uint32_t col = edge ? ring_edge_col : ring_mid_col;
+        float prev_x = 0, prev_y = 0;
+        bool have_prev = false;
         for (int t = 0; t <= period; t++) {
             int idx = t % period;
             float xx = cos_tbl[idx] * radius;
@@ -1557,9 +1549,48 @@ void render_cylindrical(uint32_t *pixels, int w, int h, const uint8_t *data, siz
             if (!project_pt(xx, ry, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) {
                 have_prev = false; continue;
             }
-            if (have_prev) draw_line_pix(pixels, w, h, prev_x, prev_y, sxp, syp, ring);
+            if (have_prev) draw_line_pix(pixels, w, h, prev_x, prev_y, sxp, syp, col);
             prev_x = sxp; prev_y = syp; have_prev = true;
         }
+    }
+    for (int m = 0; m < n_meridians; m++) {
+        int idx = (m * period) / n_meridians;
+        float xx = cos_tbl[idx] * radius;
+        float zz = sin_tbl[idx] * radius;
+        float tx, ty, bx, by;
+        if (!project_pt(xx, -height * 0.5f, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &tx, &ty)) continue;
+        if (!project_pt(xx,  height * 0.5f, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &bx, &by)) continue;
+        draw_line_pix(pixels, w, h, tx, ty, bx, by, meridian_col);
+    }
+
+    size_t step = 1;
+    size_t cap = 400000;
+    if (size > cap) step = size / cap;
+
+    /* data trace: connect consecutive samples with byte-class-colored segments;
+     * skip the chord that would jump across the cylinder when angle wraps. */
+    float prev_sx = 0, prev_sy = 0;
+    int prev_ti = -1;
+    bool have_prev_pt = false;
+    for (size_t i = 0; i < size; i += step) {
+        int  ti = (int)(i & 0xFF);
+        float yy = ((float)i / (float)size - 0.5f) * height;
+        float xx = cos_tbl[ti] * radius;
+        float zz = sin_tbl[ti] * radius;
+        float sxp, syp;
+        if (!project_pt(xx, yy, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) {
+            have_prev_pt = false;
+            continue;
+        }
+        uint32_t col = byte_class_color(data[i]);
+        if (have_prev_pt && ti >= prev_ti) {
+            draw_line_pix(pixels, w, h, prev_sx, prev_sy, sxp, syp, col);
+        } else {
+            int px = (int)sxp, py = (int)syp;
+            if (px >= 0 && px < w && py >= 0 && py < h)
+                pixels[py * w + px] = col;
+        }
+        prev_sx = sxp; prev_sy = syp; prev_ti = ti; have_prev_pt = true;
     }
 
     /* axial offset ladder: 5 ticks projected at (x=-radius, z=0) */
@@ -1898,34 +1929,65 @@ void render_helical(uint32_t *pixels, int w, int h, const uint8_t *data, size_t 
     if (ok_t && ok_b)
         draw_line_pix(pixels, w, h, ax_top_x, ax_top_y, ax_bot_x, ax_bot_y, axis_col);
 
-    /* faint top/bottom rings to ground the eye */
-    for (int ring_i = 0; ring_i < 2; ring_i++) {
-        float ry = (ring_i == 0) ? -height * 0.5f : height * 0.5f;
+    /* dense wireframe of the implied cylinder: parallels + meridians.
+     * The helix winds along this surface, so the lattice anchors it visually. */
+    const int n_parallels = 8;
+    const int n_meridians = 24;
+    const int wf_segs = 96;
+    uint32_t ring_edge_col = rgb(70, 70, 100);
+    uint32_t ring_mid_col  = rgb(40, 40, 60);
+    uint32_t meridian_col  = rgb(50, 50, 75);
+
+    for (int ring_i = 0; ring_i < n_parallels; ring_i++) {
+        float tr = (n_parallels > 1) ? (float)ring_i / (float)(n_parallels - 1) : 0.5f;
+        float ry = (tr - 0.5f) * height;
+        bool edge = (ring_i == 0 || ring_i == n_parallels - 1);
+        uint32_t col = edge ? ring_edge_col : ring_mid_col;
         float prev_x = 0, prev_y = 0;
         bool have_prev = false;
-        const int segs = 96;
-        for (int ti = 0; ti <= segs; ti++) {
-            float a = (float)ti * (two_pi / (float)segs);
+        for (int ti = 0; ti <= wf_segs; ti++) {
+            float a = (float)ti * (two_pi / (float)wf_segs);
             float sxp, syp;
             if (!project_pt(cosf(a) * radius, ry, sinf(a) * radius,
                             cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) {
                 have_prev = false; continue;
             }
-            if (have_prev) draw_line_pix(pixels, w, h, prev_x, prev_y, sxp, syp, axis_col);
+            if (have_prev) draw_line_pix(pixels, w, h, prev_x, prev_y, sxp, syp, col);
             prev_x = sxp; prev_y = syp; have_prev = true;
         }
     }
+    for (int m = 0; m < n_meridians; m++) {
+        float a = (float)m * (two_pi / (float)n_meridians);
+        float mxx = cosf(a) * radius;
+        float mzz = sinf(a) * radius;
+        float tx, ty, bx, by;
+        if (!project_pt(mxx, -height * 0.5f, mzz, cy, sy, cp, sp, cam_d, f, ox, oo, &tx, &ty)) continue;
+        if (!project_pt(mxx,  height * 0.5f, mzz, cy, sy, cp, sp, cam_d, f, ox, oo, &bx, &by)) continue;
+        draw_line_pix(pixels, w, h, tx, ty, bx, by, meridian_col);
+    }
 
+    /* data spiral: connect each sample to the previous with a byte-class colored
+     * segment. The helix is continuous, so no wrap detection is needed. */
+    float prev_sx = 0, prev_sy = 0;
+    bool have_prev_pt = false;
     for (size_t i = 0; i < size; i += step) {
         float yy = ((float)i * inv_size - 0.5f) * height;
         float xx = c * radius;
         float zz = s * radius;
         float sxp, syp;
-        if (project_pt(xx, yy, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) {
-            int px = (int)sxp, py = (int)syp;
-            if (px >= 0 && px < w && py >= 0 && py < h) {
-                pixels[py * w + px] = byte_class_color(data[i]);
+        bool ok = project_pt(xx, yy, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp);
+        if (ok) {
+            uint32_t col = byte_class_color(data[i]);
+            if (have_prev_pt) {
+                draw_line_pix(pixels, w, h, prev_sx, prev_sy, sxp, syp, col);
+            } else {
+                int px = (int)sxp, py = (int)syp;
+                if (px >= 0 && px < w && py >= 0 && py < h)
+                    pixels[py * w + px] = col;
             }
+            prev_sx = sxp; prev_sy = syp; have_prev_pt = true;
+        } else {
+            have_prev_pt = false;
         }
         float nc = c * dc - s * ds;
         float ns = s * dc + c * ds;
@@ -1997,55 +2059,93 @@ void render_torus(uint32_t *pixels, int w, int h, const uint8_t *data, size_t si
         cos_v[i] = cosf(a); sin_v[i] = sinf(a);
     }
 
-    /* wireframe: outer equator (v=0) and a side ring (u=0) */
-    uint32_t wire_col = rgb(60, 60, 90);
-    float prev_x = 0, prev_y = 0;
-    bool have_prev;
+    /* dense u x v wireframe lattice so the toroidal shape reads clearly. */
+    uint32_t wire_edge_col = rgb(70, 70, 100);
+    uint32_t wire_mid_col  = rgb(40, 40, 60);
 
-    have_prev = false;
-    for (int t = 0; t <= period_outer; t++) {
-        int idx = t % period_outer;
-        float xx = (R_major + R_minor) * cos_u[idx];
-        float zz = (R_major + R_minor) * sin_u[idx];
-        float sxp, syp;
-        if (!project_pt(xx, 0, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) {
-            have_prev = false; continue;
+    const int n_v_isolines = 8;    /* big rings at different tube heights */
+    const int n_u_isolines = 16;   /* small cross-section circles around the donut */
+    const int inner_segs   = 96;
+
+    /* v-isolines: loop in u, at each fixed v_idx draw a big ring */
+    for (int vi = 0; vi < n_v_isolines; vi++) {
+        int v_idx = (vi * period_inner) / n_v_isolines;
+        float cvv = cos_v[v_idx], svv = sin_v[v_idx];
+        float ring_r = R_major + R_minor * cvv;
+        float y_ring = R_minor * svv;
+        uint32_t col = (v_idx == 0) ? wire_edge_col : wire_mid_col;
+        float prev_x = 0, prev_y = 0;
+        bool have_prev = false;
+        for (int t = 0; t <= period_outer; t++) {
+            int idx = t % period_outer;
+            float xx = ring_r * cos_u[idx];
+            float zz = ring_r * sin_u[idx];
+            float sxp, syp;
+            if (!project_pt(xx, y_ring, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) {
+                have_prev = false; continue;
+            }
+            if (have_prev) draw_line_pix(pixels, w, h, prev_x, prev_y, sxp, syp, col);
+            prev_x = sxp; prev_y = syp; have_prev = true;
         }
-        if (have_prev) draw_line_pix(pixels, w, h, prev_x, prev_y, sxp, syp, wire_col);
-        prev_x = sxp; prev_y = syp; have_prev = true;
     }
-    have_prev = false;
-    const int inner_segs = 128;
-    for (int t = 0; t <= inner_segs; t++) {
-        float a = (float)t * (two_pi / (float)inner_segs);
-        float xx = R_major + R_minor * cosf(a);
-        float yy = R_minor * sinf(a);
-        float sxp, syp;
-        if (!project_pt(xx, yy, 0, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) {
-            have_prev = false; continue;
+
+    /* u-isolines: loop in v, at each fixed u_idx draw a small cross-section circle */
+    for (int ui = 0; ui < n_u_isolines; ui++) {
+        int u_idx = (ui * period_outer) / n_u_isolines;
+        float cu = cos_u[u_idx], su = sin_u[u_idx];
+        uint32_t col = (u_idx == 0) ? wire_edge_col : wire_mid_col;
+        float prev_x = 0, prev_y = 0;
+        bool have_prev = false;
+        for (int t = 0; t <= inner_segs; t++) {
+            float a = (float)t * (two_pi / (float)inner_segs);
+            float ring_r = R_major + R_minor * cosf(a);
+            float yy = R_minor * sinf(a);
+            float xx = ring_r * cu;
+            float zz = ring_r * su;
+            float sxp, syp;
+            if (!project_pt(xx, yy, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) {
+                have_prev = false; continue;
+            }
+            if (have_prev) draw_line_pix(pixels, w, h, prev_x, prev_y, sxp, syp, col);
+            prev_x = sxp; prev_y = syp; have_prev = true;
         }
-        if (have_prev) draw_line_pix(pixels, w, h, prev_x, prev_y, sxp, syp, wire_col);
-        prev_x = sxp; prev_y = syp; have_prev = true;
     }
 
     size_t step = 1;
     size_t cap = 400000;
     if (size > cap) step = size / cap;
 
+    /* data trace: connect consecutive samples with byte-class colored segments,
+     * skipping chords across the donut on u or v wrap boundaries. */
+    float prev_sx = 0, prev_sy = 0;
+    int prev_ui = -1, prev_vi = -1;
+    bool have_prev_pt = false;
     for (size_t i = 0; i < size; i += step) {
         int ui = (int)(i & 0xFF);                       /* i % 256       */
         int vi = (int)((i >> 8) & 0xFF);                /* (i / 256) % 256 */
         float cu = cos_u[ui], su = sin_u[ui];
         float cvv = cos_v[vi], svv = sin_v[vi];
-        float ring = R_major + R_minor * cvv;
-        float xx = ring * cu;
+        float ring_r = R_major + R_minor * cvv;
+        float xx = ring_r * cu;
         float yy = R_minor * svv;
-        float zz = ring * su;
+        float zz = ring_r * su;
         float sxp, syp;
-        if (!project_pt(xx, yy, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) continue;
-        int px = (int)sxp, py = (int)syp;
-        if (px < 0 || px >= w || py < 0 || py >= h) continue;
-        pixels[py * w + px] = byte_class_color(data[i]);
+        if (!project_pt(xx, yy, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) {
+            have_prev_pt = false;
+            continue;
+        }
+        uint32_t col = byte_class_color(data[i]);
+        bool wrapped = (vi != prev_vi) || (ui < prev_ui);
+        if (have_prev_pt && !wrapped) {
+            draw_line_pix(pixels, w, h, prev_sx, prev_sy, sxp, syp, col);
+        } else {
+            int px = (int)sxp, py = (int)syp;
+            if (px >= 0 && px < w && py >= 0 && py < h)
+                pixels[py * w + px] = col;
+        }
+        prev_sx = sxp; prev_sy = syp;
+        prev_ui = ui; prev_vi = vi;
+        have_prev_pt = true;
     }
 
     /* u/v anchor labels at strategic points on the two wireframes */
