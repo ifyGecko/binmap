@@ -42,6 +42,7 @@ typedef struct {
     SDL_Texture *cache[VIEW_COUNT];
     int cache_w, cache_h;
     bool show_legend;
+    bool show_description;
     bool needs_redraw;
     /* 3D view state */
     float yaw;
@@ -61,6 +62,9 @@ typedef struct {
 } binmap_app_t;
 
 extern const char *view_names[VIEW_COUNT];
+/* Multi-line per-view description. Each entry is a NULL-terminated array of
+ * lines; the first line is treated as a subtitle for the popup. */
+extern const char * const *view_descriptions[VIEW_COUNT];
 
 bool view_is_3d(view_id_t v);
 
