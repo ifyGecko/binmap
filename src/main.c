@@ -846,9 +846,39 @@ static void draw_status_bar(binmap_app_t *app)
     if (rx < lw + 30) rx = lw + 30;
     draw_text(app->renderer, rx, 8, 2, text_color, right);
 
-    if (p->hover_has_offset) {
-        char hover_buf[64];
+    char hover_buf[256];
+    hover_buf[0] = '\0';
+    bool have_hover = false;
+    if (app->mode == MODE_OVERLAY) {
+        bool all_have = app->panel_count > 0;
+        bool all_same = true;
+        size_t first_off = 0;
+        for (int i = 0; i < app->panel_count; i++) {
+            if (!app->panels[i].hover_has_offset) { all_have = false; break; }
+            if (i == 0) first_off = app->panels[i].hover_offset;
+            else if (app->panels[i].hover_offset != first_off) all_same = false;
+        }
+        if (all_have && all_same) {
+            snprintf(hover_buf, sizeof(hover_buf), "@0x%zX", first_off);
+            have_hover = true;
+        } else {
+            size_t len = 0;
+            for (int i = 0; i < app->panel_count; i++) {
+                if (!app->panels[i].hover_has_offset) continue;
+                int n = snprintf(hover_buf + len, sizeof(hover_buf) - len,
+                                 "%s%d@0x%zX", (len ? " " : ""),
+                                 i + 1, app->panels[i].hover_offset);
+                if (n < 0 || (size_t)n >= sizeof(hover_buf) - len) break;
+                len += (size_t)n;
+                have_hover = true;
+            }
+        }
+    } else if (p->hover_has_offset) {
         snprintf(hover_buf, sizeof(hover_buf), "@0x%zX", p->hover_offset);
+        have_hover = true;
+    }
+
+    if (have_hover) {
         int hw = text_width(2, hover_buf);
         int left_end  = 10 + lw;
         int right_beg = rx;
@@ -1298,6 +1328,27 @@ static void update_hover_offset(binmap_app_t *app, int mx, int my)
         }
     }
     if (app->current_view != VIEW_HILBERT) return;
+
+    if (app->mode == MODE_OVERLAY) {
+        int cw = app->win_w;
+        int ch = app->win_h - STATUS_BAR_H;
+        int cx = mx;
+        int cy = my - STATUS_BAR_H;
+        if (cw < 1 || ch < 1) return;
+        if (cx < 0 || cx >= cw || cy < 0 || cy >= ch) return;
+        for (int i = 0; i < app->panel_count; i++) {
+            binmap_panel_t *p = &app->panels[i];
+            size_t off;
+            size_t range = p->range_end - p->range_start;
+            if (render_hilbert_offset_at(cx, cy, cw, ch, range, p->range_start, &off)) {
+                p->hover_has_offset = true;
+                p->hover_offset = off;
+                app->needs_redraw = true;
+            }
+        }
+        return;
+    }
+
     int pi = panel_at(app, mx, my, NULL);
     if (pi < 0) return;
     binmap_panel_t *p = &app->panels[pi];
