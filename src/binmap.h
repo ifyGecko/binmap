@@ -59,6 +59,9 @@ typedef struct {
     /* whole-file minimap texture (1px tall byte_class strip stretched to track width) */
     SDL_Texture *minimap_tex;
     int          minimap_w;
+    /* hover-offset readout (currently only computed for the Hilbert view) */
+    bool   hover_has_offset;
+    size_t hover_offset;
 } binmap_app_t;
 
 extern const char *view_names[VIEW_COUNT];
@@ -74,6 +77,12 @@ void render_byte_class(uint32_t *pixels, int w, int h, const uint8_t *data, size
                        size_t base_offset, size_t file_size);
 void render_hilbert   (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
                        size_t base_offset, size_t file_size);
+/* Inverse mapping for the Hilbert view: given a pixel inside the canvas
+ * passed to render_hilbert (same w, h, size, base_offset), report the file
+ * offset of the byte chunk drawn there. Returns false outside the curve
+ * image or in the dead zone past the end of data. */
+bool render_hilbert_offset_at(int mx, int my, int w, int h,
+                              size_t size, size_t base_offset, size_t *out_off);
 void render_digraph   (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
                        size_t base_offset, size_t file_size);
 void render_entropy   (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,

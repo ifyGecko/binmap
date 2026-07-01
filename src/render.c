@@ -233,6 +233,58 @@ static void draw_corner_label(uint32_t *pixels, int w, int h,
     blit_text(pixels, w, h, x, y, scale, OVERLAY_LABEL_COLOR, buf);
 }
 
+/* Marker drawn at the curve cell containing the file's final byte, used when
+ * the curve grid is bigger than the data so several corners would otherwise
+ * collapse to the same clamped file-end offset. */
+static void draw_end_marker(uint32_t *pixels, int w, int h,
+                            int img_x0, int img_y0, int img_size, int cell,
+                            int ex, int ey, size_t off, size_t file_size)
+{
+    int px = img_x0 + ex * cell;
+    int py = img_y0 + ey * cell;
+    int pad = 2;
+    int r0 = px - pad;
+    int r1 = px + cell + pad - 1;
+    int rt = py - pad;
+    int rb = py + cell + pad - 1;
+    /* 2px-thick outline ring */
+    draw_hline(pixels, w, h, r0,     r1,     rt,     OVERLAY_TITLE_COLOR);
+    draw_hline(pixels, w, h, r0,     r1,     rb,     OVERLAY_TITLE_COLOR);
+    draw_vline(pixels, w, h, r0,     rt,     rb,     OVERLAY_TITLE_COLOR);
+    draw_vline(pixels, w, h, r1,     rt,     rb,     OVERLAY_TITLE_COLOR);
+    draw_hline(pixels, w, h, r0 + 1, r1 - 1, rt + 1, OVERLAY_TITLE_COLOR);
+    draw_hline(pixels, w, h, r0 + 1, r1 - 1, rb - 1, OVERLAY_TITLE_COLOR);
+    draw_vline(pixels, w, h, r0 + 1, rt + 1, rb - 1, OVERLAY_TITLE_COLOR);
+    draw_vline(pixels, w, h, r1 - 1, rt + 1, rb - 1, OVERLAY_TITLE_COLOR);
+
+    char buf[32];
+    format_hex_offset(buf, sizeof(buf), off, file_size);
+    int scale = 1;
+    int tw = text_width(scale, buf);
+    int th = FONT_H * scale;
+    int label_pad = 4;
+    /* prefer placing label to the right of the marker; fall back to left */
+    int tx = r1 + label_pad + 1;
+    if (tx + tw > img_x0 + img_size - 2) tx = r0 - label_pad - tw;
+    if (tx < img_x0 + 2) tx = img_x0 + 2;
+    int ty = py + cell / 2 - th / 2;
+    if (ty < img_y0 + 2) ty = img_y0 + 2;
+    if (ty + th > img_y0 + img_size - 2) ty = img_y0 + img_size - th - 2;
+    /* shadow box, same recipe as draw_corner_label */
+    for (int by = ty - 1; by < ty + th + 1; by++) {
+        for (int bx = tx - 1; bx < tx + tw + 1; bx++) {
+            if (bx < 0 || bx >= w || by < 0 || by >= h) continue;
+            uint32_t *p = &pixels[by * w + bx];
+            uint32_t c = *p;
+            uint8_t rr = (uint8_t)(((c >> 16) & 0xFF) / 3);
+            uint8_t gg = (uint8_t)(((c >> 8)  & 0xFF) / 3);
+            uint8_t bb = (uint8_t)(( c        & 0xFF) / 3);
+            *p = rgb(rr, gg, bb);
+        }
+    }
+    blit_text(pixels, w, h, tx, ty, scale, OVERLAY_TITLE_COLOR, buf);
+}
+
 static void render_curve(uint32_t *pixels, int w, int h,
                          const uint8_t *data, size_t size,
                          size_t base_offset, size_t file_size,
@@ -288,15 +340,25 @@ static void render_curve(uint32_t *pixels, int w, int h,
         }
     }
 
-    /* corner offset labels */
+    /* corner offset labels — skip corners the data never reaches */
     for (int iy = 0; iy < 2; iy++) {
         for (int ix = 0; ix < 2; ix++) {
             if (!corner_found[iy][ix]) continue;
             uint64_t d = corner_d[iy][ix];
+            if (d * bpc >= size) continue;
             size_t off = base_offset + (size_t)(d * bpc);
-            if (off > base_offset + size) off = base_offset + size;
             draw_corner_label(pixels, w, h, ix, iy, ox, oy, img, off, file_size);
         }
+    }
+
+    /* end-of-data marker: only when the curve overshoots the actual data,
+     * so the four-corner labels can't express where the file truly ends */
+    uint64_t d_end = (size - 1) / bpc;
+    if (d_end < total_cells - 1) {
+        int ex = 0, ey = 0;
+        d2xy(n, (int)d_end, &ex, &ey);
+        draw_end_marker(pixels, w, h, ox, oy, img, cell,
+                        ex, ey, base_offset + size, file_size);
     }
 }
 
@@ -304,6 +366,54 @@ void render_hilbert(uint32_t *pixels, int w, int h, const uint8_t *data, size_t 
                     size_t base_offset, size_t file_size)
 {
     render_curve(pixels, w, h, data, size, base_offset, file_size, d2xy_hilbert);
+}
+
+/* Inverse of d2xy_hilbert: (cx, cy) -> d on an n x n grid. Mirrors the
+ * rotation/reflection sequence used in d2xy_hilbert exactly. */
+static int xy2d_hilbert(int n, int x, int y)
+{
+    int rx, ry, d = 0;
+    for (int s = n / 2; s > 0; s /= 2) {
+        rx = (x & s) ? 1 : 0;
+        ry = (y & s) ? 1 : 0;
+        d += s * s * ((3 * rx) ^ ry);
+        if (ry == 0) {
+            if (rx == 1) { x = s - 1 - x; y = s - 1 - y; }
+            int tmp = x; x = y; y = tmp;
+        }
+    }
+    return d;
+}
+
+bool render_hilbert_offset_at(int mx, int my, int w, int h,
+                              size_t size, size_t base_offset, size_t *out_off)
+{
+    if (size == 0 || w < 2 || h < 2) return false;
+    int side = (w < h) ? w : h;
+    int n = 1;
+    while ((n * 2) <= side) n *= 2;
+    if (n < 2) return false;
+    int cell = side / n;
+    if (cell < 1) cell = 1;
+    int img = n * cell;
+    int ox = (w - img) / 2;
+    int oy = (h - img) / 2;
+
+    if (mx < ox || mx >= ox + img) return false;
+    if (my < oy || my >= oy + img) return false;
+    int cx = (mx - ox) / cell;
+    int cy = (my - oy) / cell;
+    if (cx < 0 || cx >= n || cy < 0 || cy >= n) return false;
+
+    uint64_t total_cells = (uint64_t)n * (uint64_t)n;
+    uint64_t bpc = (size + total_cells - 1) / total_cells;
+    if (bpc < 1) bpc = 1;
+
+    uint64_t d = (uint64_t)xy2d_hilbert(n, cx, cy);
+    uint64_t cell_off = d * bpc;
+    if (cell_off >= size) return false;
+    if (out_off) *out_off = base_offset + (size_t)cell_off;
+    return true;
 }
 
 /* ---------- Digraph dot plot ---------- */

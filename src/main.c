@@ -462,8 +462,23 @@ static void draw_status_bar(binmap_app_t *app)
     SDL_Color text_color = {200, 200, 215, 255};
     int rw = text_width(2, right);
     int rx = app->win_w - rw - 10;
-    if (rx < text_width(2, left) + 30) rx = text_width(2, left) + 30;
+    int lw = text_width(2, left);
+    if (rx < lw + 30) rx = lw + 30;
     draw_text(app->renderer, rx, 8, 2, text_color, right);
+
+    if (app->hover_has_offset) {
+        char hover_buf[64];
+        snprintf(hover_buf, sizeof(hover_buf), "@0x%zX", app->hover_offset);
+        int hw = text_width(2, hover_buf);
+        int left_end  = 10 + lw;
+        int right_beg = rx;
+        int gap_w = right_beg - left_end;
+        if (gap_w >= hw + 20) {
+            int hx = left_end + (gap_w - hw) / 2;
+            SDL_Color hover_col = {255, 240, 160, 255};
+            draw_text(app->renderer, hx, 8, 2, hover_col, hover_buf);
+        }
+    }
 }
 
 static void draw_legend(binmap_app_t *app)
@@ -651,6 +666,7 @@ static void switch_view(binmap_app_t *app, view_id_t v)
 {
     app->current_view = v;
     app->show_description = false;
+    app->hover_has_offset = false;
     app->needs_redraw = true;
 }
 
@@ -786,8 +802,42 @@ static void handle_mouse_down(binmap_app_t *app, int mx, int my)
     app->needs_redraw = true;
 }
 
-static void handle_mouse_motion(binmap_app_t *app, int mx)
+static void update_hover_offset(binmap_app_t *app, int mx, int my)
 {
+    bool prev_has = app->hover_has_offset;
+    size_t prev_off = app->hover_offset;
+    app->hover_has_offset = false;
+
+    int canvas_y = my - STATUS_BAR_H;
+    int canvas_w = app->win_w;
+    int canvas_h = app->win_h - STATUS_BAR_H - SLIDER_BAR_H;
+    if (canvas_y >= 0 && canvas_y < canvas_h && mx >= 0 && mx < canvas_w
+        && app->current_view == VIEW_HILBERT) {
+        size_t off;
+        size_t range = app->range_end - app->range_start;
+        if (render_hilbert_offset_at(mx, canvas_y, canvas_w, canvas_h,
+                                     range, app->range_start, &off)) {
+            app->hover_has_offset = true;
+            app->hover_offset = off;
+        }
+    }
+    if (app->hover_has_offset != prev_has
+        || (app->hover_has_offset && app->hover_offset != prev_off)) {
+        app->needs_redraw = true;
+    }
+}
+
+static void clear_hover_offset(binmap_app_t *app)
+{
+    if (app->hover_has_offset) {
+        app->hover_has_offset = false;
+        app->needs_redraw = true;
+    }
+}
+
+static void handle_mouse_motion(binmap_app_t *app, int mx, int my)
+{
+    update_hover_offset(app, mx, my);
     if (app->drag_mode == DRAG_NONE) return;
     size_t minw = range_min_width(app);
 
@@ -986,8 +1036,10 @@ int main(int argc, char **argv)
                         handle_mouse_up(&app);
                     break;
                 case SDL_EVENT_MOUSE_MOTION:
-                    if (app.drag_mode != DRAG_NONE)
-                        handle_mouse_motion(&app, (int)ev.motion.x);
+                    handle_mouse_motion(&app, (int)ev.motion.x, (int)ev.motion.y);
+                    break;
+                case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+                    clear_hover_offset(&app);
                     break;
                 default: break;
                 }
