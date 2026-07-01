@@ -50,12 +50,20 @@ Three display modes:
 - **Focus mode** (`F` again) — one panel fills the canvas. `1`–`9` or
   `Ctrl+Tab` switches which file is focused. Press `M` to show a thumbnail
   strip along the left edge for click-to-switch.
-- **Overlay heatmap** (`H`) — every file is rendered in the current view and
-  the results are composited per-pixel. Regions where **all N files agree**
-  keep their original color; regions where they diverge fade toward black.
+- **Overlay compare** (`H`) — every file is rendered in the current view and
+  the results are composited per-pixel. `H` cycles two overlays and then
+  back off:
+    1. **SIMILARITY GLOW** — ice palette (black → blue → white). Pixels
+       glow white where every file agrees; fall to near-black where they
+       diverge. Comparing a file with itself produces a uniformly white
+       image.
+    2. **DIFFERENCE GLOW** — fire palette (black → orange → yellow → white).
+       Bright where files diverge; black where they agree. The complement
+       of similarity glow.
+
   A tandem view of the same header across firmware revisions lights up
-  bright; the sections that were patched or diverge fade. Press `H` again
-  to return to the prior mode.
+  bright in SIMILARITY GLOW; patched sections light up in DIFFERENCE GLOW.
+  Keep pressing `H` past the last scheme to return to the prior mode.
 
 Each panel keeps its own range selection — you can zoom in on the header of
 one file while looking at the body of another. Each panel has its own slider
@@ -67,7 +75,7 @@ at the bottom of its cell.
 |-----|--------|
 | `TAB` / `SHIFT+TAB` | Next / previous view (linked across panels) |
 | `F` | Toggle split / focus mode |
-| `H` | Toggle overlay agreement heatmap |
+| `H` | Cycle overlay glow (off / similarity / difference) |
 | `1`–`9` | Select panel (in focus mode: switch focused file) |
 | `CTRL+TAB` | Cycle to next panel |
 | `M` | Toggle thumbnail strip (focus mode) |

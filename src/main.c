@@ -321,25 +321,13 @@ static void invalidate_overlay_3d_caches(binmap_app_t *app)
 }
 
 /* Overlay colour schemes.  H cycles 0 (off) -> 1..NUM -> 0. */
-#define NUM_OVERLAY_SCHEMES 5
+#define NUM_OVERLAY_SCHEMES 2
 
 static const char *overlay_scheme_names[NUM_OVERLAY_SCHEMES + 1] = {
     "OFF",
-    "AGREEMENT COLOR",   /* mean_color * agreement, preserves file colours */
-    "AGREEMENT HEAT",    /* heat_color(agreement), bright = files match */
-    "DIFFERENCE HEAT",   /* heat_color(1 - agreement), bright = files diverge */
-    "CHANNEL SPLIT",     /* per-file hue on wheel, additive — RGB for N<=3 */
-    "MAX BLEND",         /* per-channel max — union of features */
+    "SIMILARITY GLOW",   /* ice palette on agreement — white = files match */
+    "DIFFERENCE GLOW",   /* fire palette on divergence — black = files match */
 };
-
-/* Any per-panel pixel darker than this in all three channels is treated as
- * "background" for that panel. Covers the darkest palettes in render.c:
- * (4,4,10) (5,5,10) (8,8,12) (8,8,14) (15,15,20) (20,20,30). */
-#define BG_CHANNEL_MAX 32
-/* Colour output for pixels ALL panels agree are background. */
-#define BG_FLAT_R 8
-#define BG_FLAT_G 8
-#define BG_FLAT_B 12
 
 static inline uint32_t rgb_u32(int r, int g, int b)
 {
@@ -352,57 +340,69 @@ static inline uint32_t rgb_u32(int r, int g, int b)
     return 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
 }
 
-/* Duplicate of the heat palette in render.c so overlay code doesn't depend on
- * it privately. */
-static uint32_t heat_color_local(float t)
+/* SIMILARITY GLOW — ice ramp: black -> ice blue -> sky -> white.
+ * agreement = 0 maps to pure black; agreement = 1 maps to pure white so
+ * identical files render as a uniformly white canvas. */
+static uint32_t overlay_ice_glow(float t)
 {
     if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+    t = powf(t, 0.55f);
     int r, g, b;
     if (t < 0.33f) {
         float k = t / 0.33f;
-        r = 0;
-        g = (int)(80.0f * k);
-        b = (int)(80.0f + 175.0f * k);
-    } else if (t < 0.66f) {
-        float k = (t - 0.33f) / 0.33f;
-        r = (int)(255.0f * k);
-        g = (int)(80.0f + 175.0f * k);
-        b = (int)(255.0f - 100.0f * k);
+        r = (int)(30.0f  * k);
+        g = (int)(60.0f  * k);
+        b = (int)(120.0f * k);
+    } else if (t < 0.75f) {
+        float k = (t - 0.33f) / 0.42f;
+        r = (int)(30.0f  + 70.0f  * k);
+        g = (int)(60.0f  + 120.0f * k);
+        b = (int)(120.0f + 135.0f * k);
     } else {
-        float k = (t - 0.66f) / 0.34f;
-        r = 255;
-        g = 255;
-        b = (int)(155.0f + 100.0f * k);
+        float k = (t - 0.75f) / 0.25f;
+        r = (int)(100.0f + 155.0f * k);
+        g = (int)(180.0f + 75.0f  * k);
+        b = 255;
     }
     return rgb_u32(r, g, b);
 }
 
-/* HSV -> RGB. h in degrees, s and v in [0,1]. Outputs in [0,1]. */
-static void hsv_to_rgb01(float h, float s, float v, float *r, float *g, float *b)
+/* DIFFERENCE GLOW — fire ramp: black -> ember -> fire -> yellow -> white.
+ * divergence = 0 maps to pure black so identical files render as a
+ * uniformly black canvas. */
+static uint32_t overlay_fire_glow(float t)
 {
-    if (s <= 0.0f) { *r = *g = *b = v; return; }
-    float hh = fmodf(h, 360.0f);
-    if (hh < 0.0f) hh += 360.0f;
-    hh /= 60.0f;
-    int   i = (int)hh;
-    float f = hh - (float)i;
-    float p = v * (1.0f - s);
-    float q = v * (1.0f - s * f);
-    float t = v * (1.0f - s * (1.0f - f));
-    switch (i) {
-    case 0: *r = v; *g = t; *b = p; break;
-    case 1: *r = q; *g = v; *b = p; break;
-    case 2: *r = p; *g = v; *b = t; break;
-    case 3: *r = p; *g = q; *b = v; break;
-    case 4: *r = t; *g = p; *b = v; break;
-    default: *r = v; *g = p; *b = q; break;
+    if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+    t = powf(t, 0.55f);
+    int r, g, b;
+    if (t < 0.33f) {
+        float k = t / 0.33f;
+        r = (int)(120.0f * k);
+        g = (int)(40.0f  * k);
+        b = 0;
+    } else if (t < 0.66f) {
+        float k = (t - 0.33f) / 0.33f;
+        r = (int)(120.0f + 135.0f * k);
+        g = (int)(40.0f  + 80.0f  * k);
+        b = 0;
+    } else if (t < 0.9f) {
+        float k = (t - 0.66f) / 0.24f;
+        r = 255;
+        g = (int)(120.0f + 120.0f * k);
+        b = (int)(60.0f  * k);
+    } else {
+        float k = (t - 0.9f) / 0.1f;
+        r = 255;
+        g = (int)(240.0f + 15.0f  * k);
+        b = (int)(60.0f  + 195.0f * k);
     }
+    return rgb_u32(r, g, b);
 }
 
 /* Build (or return cached) overlay texture using app->overlay_scheme.
- * Pixels where all N panels show near-black background are always rendered
- * flat dark and excluded from any "high agreement" appearance, so blank
- * canvas doesn't misleadingly light up in the heat views. */
+ * Agreement is derived from per-channel variance across all N panels'
+ * rendered pixels; identical panels produce zero variance and therefore
+ * maximum agreement (white for SIMILARITY GLOW, black for DIFFERENCE GLOW). */
 static SDL_Texture *ensure_overlay_texture(binmap_app_t *app, view_id_t view,
                                            int cw, int ch)
 {
@@ -435,41 +435,18 @@ static SDL_Texture *ensure_overlay_texture(binmap_app_t *app, view_id_t view,
     uint32_t *out = (uint32_t *)calloc(px_count, sizeof(uint32_t));
     if (!out) { for (int pi = 0; pi < n; pi++) free(bufs[pi]); return NULL; }
 
-    const uint32_t bg_flat = rgb_u32(BG_FLAT_R, BG_FLAT_G, BG_FLAT_B);
     const float max_var = 3.0f * 128.0f * 128.0f;
     float inv_n = 1.0f / (float)n;
 
     for (size_t i = 0; i < px_count; i++) {
-        uint8_t rvals[BINMAP_MAX_PANELS];
-        uint8_t gvals[BINMAP_MAX_PANELS];
-        uint8_t bvals[BINMAP_MAX_PANELS];
-        int bg_count = 0;
-
+        float sr = 0, sg = 0, sb = 0, sr2 = 0, sg2 = 0, sb2 = 0;
         for (int pi = 0; pi < n; pi++) {
             uint32_t c = bufs[pi][i];
-            uint8_t r = (uint8_t)((c >> 16) & 0xFF);
-            uint8_t g = (uint8_t)((c >> 8)  & 0xFF);
-            uint8_t b = (uint8_t)( c        & 0xFF);
-            rvals[pi] = r; gvals[pi] = g; bvals[pi] = b;
-            if (r < BG_CHANNEL_MAX && g < BG_CHANNEL_MAX && b < BG_CHANNEL_MAX)
-                bg_count++;
-        }
-        /* Every file shows this pixel as background — flat dark, don't feed
-         * the "agreement" signal so it doesn't misleadingly light up. */
-        if (bg_count == n) { out[i] = bg_flat; continue; }
-
-        /* Common accumulators for all schemes. */
-        float sr = 0, sg = 0, sb = 0, sr2 = 0, sg2 = 0, sb2 = 0;
-        uint8_t mxr = 0, mxg = 0, mxb = 0;
-        for (int pi = 0; pi < n; pi++) {
-            float r = (float)rvals[pi];
-            float g = (float)gvals[pi];
-            float b = (float)bvals[pi];
+            float r = (float)((c >> 16) & 0xFF);
+            float g = (float)((c >> 8)  & 0xFF);
+            float b = (float)( c        & 0xFF);
             sr += r; sg += g; sb += b;
             sr2 += r*r; sg2 += g*g; sb2 += b*b;
-            if (rvals[pi] > mxr) mxr = rvals[pi];
-            if (gvals[pi] > mxg) mxg = gvals[pi];
-            if (bvals[pi] > mxb) mxb = bvals[pi];
         }
         float mr = sr * inv_n, mg = sg * inv_n, mb = sb * inv_n;
         float vr = sr2 * inv_n - mr * mr;
@@ -480,46 +457,9 @@ static SDL_Texture *ensure_overlay_texture(binmap_app_t *app, view_id_t view,
         float agreement = 1.0f - sqrtf(norm);
         if (agreement < 0) agreement = 0;
 
-        uint32_t color;
-        switch (scheme) {
-        case 1: {   /* AGREEMENT COLOR — content preserved, divergence dims */
-            float a = powf(agreement, 0.6f);
-            color = rgb_u32((int)(mr * a), (int)(mg * a), (int)(mb * a));
-            break;
-        }
-        case 2: {   /* AGREEMENT HEAT — bright = files agree on content */
-            color = heat_color_local(agreement);
-            break;
-        }
-        case 3: {   /* DIFFERENCE HEAT — bright = files disagree */
-            color = heat_color_local(1.0f - agreement);
-            break;
-        }
-        case 4: {   /* CHANNEL SPLIT — each file colored by hue, added */
-            float rr = 0, gg = 0, bb = 0;
-            for (int pi = 0; pi < n; pi++) {
-                float intensity = (0.299f * (float)rvals[pi]
-                                 + 0.587f * (float)gvals[pi]
-                                 + 0.114f * (float)bvals[pi]) / 255.0f;
-                float hue = (float)pi * 360.0f / (float)n;
-                float hr, hg, hb;
-                hsv_to_rgb01(hue, 1.0f, intensity, &hr, &hg, &hb);
-                rr += hr; gg += hg; bb += hb;
-            }
-            color = rgb_u32((int)(rr * 255.0f),
-                            (int)(gg * 255.0f),
-                            (int)(bb * 255.0f));
-            break;
-        }
-        case 5: {   /* MAX BLEND — per-channel max, union of features */
-            color = rgb_u32((int)mxr, (int)mxg, (int)mxb);
-            break;
-        }
-        default:
-            color = bg_flat;
-            break;
-        }
-        out[i] = color;
+        out[i] = (scheme == 2)
+            ? overlay_fire_glow(1.0f - agreement)
+            : overlay_ice_glow(agreement);
     }
 
     for (int pi = 0; pi < n; pi++) free(bufs[pi]);
@@ -1598,7 +1538,7 @@ static void print_usage(const char *prog)
         "Keys:\n"
         "  TAB / SHIFT+TAB   next / previous view (linked across panels)\n"
         "  F                 toggle split / focus mode\n"
-        "  H                 cycle overlay heatmap schemes (off/1..5)\n"
+        "  H                 cycle overlay glow (off / similarity / difference)\n"
         "  1..9              select panel (focus mode: switch focused file)\n"
         "  CTRL+TAB          cycle to next panel\n"
         "  M                 toggle thumbnail strip (focus mode)\n"
