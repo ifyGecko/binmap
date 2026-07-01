@@ -23,29 +23,60 @@ Requirements: `pkg-config`, a C11 compiler, **SDL3** (`libsdl3-dev` /
 ```sh
 make
 ./binmap path/to/file
+./binmap fileA fileB                # side-by-side compare
+./binmap fileA fileB fileC fileD    # 2x2 grid, up to 8 panels
+./binmap -f fileA fileB              # start in focus mode instead of split
 ```
+
+## Multi-file compare
+
+Pass up to **8 files** and binmap tiles them into a grid with per-panel range
+sliders. The current view (TAB), 3D rotation, and zoom are **linked** across
+panels — TAB cycles the view on every file simultaneously so you're always
+comparing the same representation.
+
+Two display modes, toggled by `F`:
+
+- **Split mode** (default when multiple files given) — every file tiled and
+  visible at once. Mouse-hover determines the active panel (yellow border);
+  keyboard range-nudge keys (`[`, `]`, `,`, `.`, `0`) target it. `1`–`9` also
+  select the active panel directly.
+- **Focus mode** — one panel fills the canvas. `1`–`9` or `Ctrl+Tab` switches
+  which file is focused. Press `M` to show a thumbnail strip along the left
+  edge for click-to-switch.
+
+Each panel keeps its own range selection — you can zoom in on the header of
+one file while looking at the body of another. Each panel has its own slider
+at the bottom of its cell.
 
 ## Controls
 
 | Key | Action |
 |-----|--------|
-| `TAB` / `SHIFT+TAB` | Next / previous view |
+| `TAB` / `SHIFT+TAB` | Next / previous view (linked across panels) |
+| `F` | Toggle split / focus mode |
+| `1`–`9` | Select panel (in focus mode: switch focused file) |
+| `CTRL+TAB` | Cycle to next panel |
+| `M` | Toggle thumbnail strip (focus mode) |
 | `L` | Toggle the on-screen legend |
 | `D` | Toggle a short description of the current view |
 | `A` | Toggle auto-rotate (3D views only) |
 | `←` `→` `↑` `↓` | Manual rotate (3D views only) |
 | `+` `-` / mouse wheel | Zoom in / out (3D views only) |
 | `R` | Reset 3D view (yaw, pitch, zoom, auto-rotate) |
-| `[` / `]` | Nudge range start backward / forward |
-| `,` / `.` | Nudge range end backward / forward |
+| `[` / `]` | Nudge active panel range start backward / forward |
+| `,` / `.` | Nudge active panel range end backward / forward |
 | `SHIFT` + key | Coarse range step |
-| `0` | Reset range to the full file |
-| Mouse drag | Adjust range via the slider at the bottom |
+| `0` | Reset active panel range to the full file |
+| Mouse drag | Adjust range via a panel's slider |
 | `ESC` / `Q` | Quit |
 
-The status bar shows the current view, the file name and size, and (for 3D
-views) live yaw / pitch / zoom and whether auto-rotate is on. Press `D` for
-an in-app reminder of what the current view actually shows.
+The status bar shows the current view, and for the active panel: its file
+name and size, current range, and (for 3D views) live yaw / pitch / zoom and
+whether auto-rotate is on. With more than one file loaded, the status bar
+also shows `<n/N S>` (split) or `<n/N F>` (focus) with the active panel
+number. Press `D` for an in-app reminder of what the current view actually
+shows.
 
 ---
 
@@ -205,7 +236,10 @@ binmap/
 ## Limitations
 
 - Linux only. (SDL3 makes porting cheap; not yet packaged.)
-- Single-file, interactive viewer — no batch / headless PNG output.
+- Interactive viewer only — no batch / headless PNG output.
+- Multi-file compare tiles up to 8 files; beyond that, open a second
+  instance. Ranges and 3D orientation are linked; view mode is linked so
+  you're always comparing the same representation.
 - Fixed color palettes per view (no user-configurable themes).
 - 3D views subsample to ~400 k points for animation; very large files
   display structural patterns but not every byte.

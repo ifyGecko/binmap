@@ -6,6 +6,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define BINMAP_MAX_PANELS 8
+
 typedef enum {
     VIEW_BYTE_CLASS = 0,
     VIEW_HILBERT,
@@ -33,35 +35,50 @@ typedef enum {
     DRAG_MIDDLE
 } drag_mode_t;
 
+typedef enum {
+    MODE_SPLIT = 0,
+    MODE_FOCUS
+} display_mode_t;
+
+/* Per-file state. Everything cached, dragged, or hovered is per-panel. */
 typedef struct {
-    SDL_Window  *window;
+    binmap_file_t file;
+    SDL_Texture  *cache[VIEW_COUNT];
+    int           cache_w, cache_h;
+    SDL_Texture  *minimap_tex;
+    int           minimap_w;
+    size_t        range_start;    /* inclusive */
+    size_t        range_end;      /* exclusive */
+    drag_mode_t   drag_mode;
+    size_t        drag_anchor_start;
+    size_t        drag_anchor_end;
+    int           drag_anchor_px;
+    bool          hover_has_offset;
+    size_t        hover_offset;
+    /* Recomputed each frame from window size + display mode */
+    SDL_FRect     canvas_rect;
+    SDL_FRect     slider_rect;
+} binmap_panel_t;
+
+typedef struct {
+    SDL_Window   *window;
     SDL_Renderer *renderer;
     int win_w, win_h;
     view_id_t current_view;
-    binmap_file_t file;
-    SDL_Texture *cache[VIEW_COUNT];
-    int cache_w, cache_h;
+    binmap_panel_t panels[BINMAP_MAX_PANELS];
+    int panel_count;
+    int active_panel;      /* last hovered / selected — receives keyboard range nudges in split */
+    int focus_panel;       /* which panel fills the canvas in MODE_FOCUS */
+    display_mode_t mode;
+    bool show_thumb_strip; /* only meaningful in MODE_FOCUS */
     bool show_legend;
     bool show_description;
     bool needs_redraw;
-    /* 3D view state */
+    /* 3D — shared across all panels so views compare in sync */
     float yaw;
     float pitch;
     float zoom;
     bool  auto_rotate;
-    /* range slider state */
-    size_t range_start;   /* inclusive */
-    size_t range_end;     /* exclusive */
-    drag_mode_t drag_mode;
-    size_t drag_anchor_start;
-    size_t drag_anchor_end;
-    int    drag_anchor_px;
-    /* whole-file minimap texture (1px tall byte_class strip stretched to track width) */
-    SDL_Texture *minimap_tex;
-    int          minimap_w;
-    /* hover-offset readout (currently only computed for the Hilbert view) */
-    bool   hover_has_offset;
-    size_t hover_offset;
 } binmap_app_t;
 
 extern const char *view_names[VIEW_COUNT];
