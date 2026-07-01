@@ -94,12 +94,33 @@ extern const char * const *view_descriptions[VIEW_COUNT];
 
 bool view_is_3d(view_id_t v);
 
+/* Renderers can produce three flavors of the same view:
+ *   FULL       — data pixels + decorations (labels, wireframes, grids, titles).
+ *                All output pixels are opaque (alpha = 0xFF). Used by the
+ *                standard single-panel display.
+ *   DATA_ONLY  — only pixels genuinely derived from file bytes (byte-class
+ *                colors, curve cells, heat cells, on/off bits, density colors,
+ *                point-cloud counts). Data pixels are alpha=0xFF; every other
+ *                pixel stays at the caller's zero-init (alpha=0). Used as
+ *                per-panel input to the overlay similarity/difference calc.
+ *   DECOR_ONLY — only decorations (wireframes, grids, cell borders, corner /
+ *                offset / axis labels, tick marks, per-cell orientation
+ *                labels). Titles are suppressed. Non-decoration pixels stay
+ *                at alpha=0. Used to layer legends on top of the overlay glow
+ *                so the user can still read offsets / coordinates without
+ *                leaving overlay mode. */
+typedef enum {
+    RENDER_FULL = 0,
+    RENDER_DATA_ONLY,
+    RENDER_DECOR_ONLY,
+} render_mode_t;
+
 /* 2D renderers. base_offset is the absolute file offset of data[0]; used by
  * label overlays to render true file offsets even when a sub-range is shown. */
 void render_byte_class(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
-                       size_t base_offset, size_t file_size);
+                       size_t base_offset, size_t file_size, render_mode_t mode);
 void render_hilbert   (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
-                       size_t base_offset, size_t file_size);
+                       size_t base_offset, size_t file_size, render_mode_t mode);
 /* Inverse mapping for the Hilbert view: given a pixel inside the canvas
  * passed to render_hilbert (same w, h, size, base_offset), report the file
  * offset of the byte chunk drawn there. Returns false outside the curve
@@ -107,28 +128,28 @@ void render_hilbert   (uint32_t *pixels, int w, int h, const uint8_t *data, size
 bool render_hilbert_offset_at(int mx, int my, int w, int h,
                               size_t size, size_t base_offset, size_t *out_off);
 void render_digraph   (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
-                       size_t base_offset, size_t file_size);
+                       size_t base_offset, size_t file_size, render_mode_t mode);
 void render_entropy   (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
-                       size_t base_offset, size_t file_size);
+                       size_t base_offset, size_t file_size, render_mode_t mode);
 void render_bit_plane (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
-                       size_t base_offset, size_t file_size);
+                       size_t base_offset, size_t file_size, render_mode_t mode);
 void render_strings_density(uint32_t *pixels, int w, int h,
                             const uint8_t *data, size_t size,
-                            size_t base_offset, size_t file_size);
+                            size_t base_offset, size_t file_size, render_mode_t mode);
 void render_self_similarity(uint32_t *pixels, int w, int h,
                             const uint8_t *data, size_t size,
-                            size_t base_offset, size_t file_size);
+                            size_t base_offset, size_t file_size, render_mode_t mode);
 void render_rgb_raw        (uint32_t *pixels, int w, int h,
                             const uint8_t *data, size_t size,
-                            size_t base_offset, size_t file_size);
+                            size_t base_offset, size_t file_size, render_mode_t mode);
 
 /* 3D renderers (yaw/pitch in radians) */
 void render_trigraph   (uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
                         size_t base_offset, size_t file_size,
-                        float yaw, float pitch, float zoom);
+                        float yaw, float pitch, float zoom, render_mode_t mode);
 void render_trigraph_spherical(uint32_t *pixels, int w, int h,
                                const uint8_t *data, size_t size,
                                size_t base_offset, size_t file_size,
-                               float yaw, float pitch, float zoom);
+                               float yaw, float pitch, float zoom, render_mode_t mode);
 
 #endif

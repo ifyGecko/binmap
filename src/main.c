@@ -238,10 +238,12 @@ static void invalidate_3d_caches(binmap_app_t *app)
 }
 
 /* Render one panel's current view into a caller-provided pixel buffer.
- * Shared by ensure_view_texture (single-panel path) and ensure_overlay_texture
- * (blends N panels' buffers together). */
+ * Shared by ensure_view_texture (single-panel path — RENDER_FULL) and
+ * ensure_overlay_texture (RENDER_DATA_ONLY for the variance input,
+ * RENDER_DECOR_ONLY for the legend layer that is composited on top). */
 static void render_view_pixels(binmap_app_t *app, int pi, view_id_t view,
-                               int cw, int ch, uint32_t *pixels)
+                               int cw, int ch, uint32_t *pixels,
+                               render_mode_t mode)
 {
     binmap_panel_t *p = &app->panels[pi];
     const uint8_t *d  = p->file.data + p->range_start;
@@ -250,20 +252,20 @@ static void render_view_pixels(binmap_app_t *app, int pi, view_id_t view,
     size_t         fs = p->file.size;
 
     switch (view) {
-    case VIEW_BYTE_CLASS:      render_byte_class     (pixels, cw, ch, d, s, bo, fs); break;
-    case VIEW_HILBERT:         render_hilbert        (pixels, cw, ch, d, s, bo, fs); break;
-    case VIEW_DIGRAPH:         render_digraph        (pixels, cw, ch, d, s, bo, fs); break;
-    case VIEW_ENTROPY:         render_entropy        (pixels, cw, ch, d, s, bo, fs); break;
-    case VIEW_STRINGS_DENSITY: render_strings_density(pixels, cw, ch, d, s, bo, fs); break;
-    case VIEW_SELF_SIMILARITY: render_self_similarity(pixels, cw, ch, d, s, bo, fs); break;
-    case VIEW_BIT_PLANE:       render_bit_plane      (pixels, cw, ch, d, s, bo, fs); break;
-    case VIEW_RGB_RAW:         render_rgb_raw        (pixels, cw, ch, d, s, bo, fs); break;
+    case VIEW_BYTE_CLASS:      render_byte_class     (pixels, cw, ch, d, s, bo, fs, mode); break;
+    case VIEW_HILBERT:         render_hilbert        (pixels, cw, ch, d, s, bo, fs, mode); break;
+    case VIEW_DIGRAPH:         render_digraph        (pixels, cw, ch, d, s, bo, fs, mode); break;
+    case VIEW_ENTROPY:         render_entropy        (pixels, cw, ch, d, s, bo, fs, mode); break;
+    case VIEW_STRINGS_DENSITY: render_strings_density(pixels, cw, ch, d, s, bo, fs, mode); break;
+    case VIEW_SELF_SIMILARITY: render_self_similarity(pixels, cw, ch, d, s, bo, fs, mode); break;
+    case VIEW_BIT_PLANE:       render_bit_plane      (pixels, cw, ch, d, s, bo, fs, mode); break;
+    case VIEW_RGB_RAW:         render_rgb_raw        (pixels, cw, ch, d, s, bo, fs, mode); break;
     case VIEW_TRIGRAPH:
-        render_trigraph(pixels, cw, ch, d, s, bo, fs, app->yaw, app->pitch, app->zoom);
+        render_trigraph(pixels, cw, ch, d, s, bo, fs, app->yaw, app->pitch, app->zoom, mode);
         break;
     case VIEW_TRIGRAPH_SPHERICAL:
         render_trigraph_spherical(pixels, cw, ch, d, s, bo, fs,
-                                  app->yaw, app->pitch, app->zoom);
+                                  app->yaw, app->pitch, app->zoom, mode);
         break;
     default: break;
     }
@@ -281,7 +283,7 @@ static SDL_Texture *ensure_view_texture(binmap_app_t *app, int pi,
 
     uint32_t *pixels = (uint32_t *)calloc((size_t)cw * (size_t)ch, sizeof(uint32_t));
     if (!pixels) return NULL;
-    render_view_pixels(app, pi, view, cw, ch, pixels);
+    render_view_pixels(app, pi, view, cw, ch, pixels, RENDER_FULL);
 
     if (!p->cache[view]) {
         p->cache[view] = SDL_CreateTexture(app->renderer,
@@ -419,9 +421,10 @@ static SDL_Texture *ensure_overlay_texture(binmap_app_t *app, view_id_t view,
     size_t px_count = (size_t)cw * (size_t)ch;
     int n = app->panel_count;
 
-    /* Render every panel into its own scratch buffer. Keeps the per-pixel
-     * inner loop simple and lets schemes (like CHANNEL SPLIT) inspect
-     * per-file values instead of only aggregate stats. */
+    /* Render every panel's DATA-ONLY image into its own scratch buffer.
+     * Decorations (labels, wireframes, grids, ticks, titles) are excluded
+     * here so they don't corrupt the similarity / difference signal — data
+     * pixels have alpha=0xFF, non-data stays at calloc'd 0. */
     uint32_t *bufs[BINMAP_MAX_PANELS] = {0};
     for (int pi = 0; pi < n; pi++) {
         bufs[pi] = (uint32_t *)calloc(px_count, sizeof(uint32_t));
@@ -429,7 +432,7 @@ static SDL_Texture *ensure_overlay_texture(binmap_app_t *app, view_id_t view,
             for (int j = 0; j < pi; j++) free(bufs[j]);
             return NULL;
         }
-        render_view_pixels(app, pi, view, cw, ch, bufs[pi]);
+        render_view_pixels(app, pi, view, cw, ch, bufs[pi], RENDER_DATA_ONLY);
     }
 
     uint32_t *out = (uint32_t *)calloc(px_count, sizeof(uint32_t));
@@ -437,17 +440,26 @@ static SDL_Texture *ensure_overlay_texture(binmap_app_t *app, view_id_t view,
 
     const float max_var = 3.0f * 128.0f * 128.0f;
     float inv_n = 1.0f / (float)n;
-
+    /* Renderers write the alpha byte as 0 for anything that isn't file byte
+     * data (bg fills, wireframes, grid lines, tick marks, axis / corner
+     * labels, titles, borders) and 0xFF for pixels genuinely derived from
+     * the file's bytes. If every panel marks a pixel as non-data, emit pure
+     * black so decorative chrome and empty regions never confuse the
+     * similarity / difference signal. */
     for (size_t i = 0; i < px_count; i++) {
+        bool any_data = false;
         float sr = 0, sg = 0, sb = 0, sr2 = 0, sg2 = 0, sb2 = 0;
         for (int pi = 0; pi < n; pi++) {
             uint32_t c = bufs[pi][i];
+            if (c & 0xFF000000u) any_data = true;
             float r = (float)((c >> 16) & 0xFF);
             float g = (float)((c >> 8)  & 0xFF);
             float b = (float)( c        & 0xFF);
             sr += r; sg += g; sb += b;
             sr2 += r*r; sg2 += g*g; sb2 += b*b;
         }
+        if (!any_data) { out[i] = 0xFF000000u; continue; }
+
         float mr = sr * inv_n, mg = sg * inv_n, mb = sb * inv_n;
         float vr = sr2 * inv_n - mr * mr;
         float vg = sg2 * inv_n - mg * mg;
@@ -463,6 +475,23 @@ static SDL_Texture *ensure_overlay_texture(binmap_app_t *app, view_id_t view,
     }
 
     for (int pi = 0; pi < n; pi++) free(bufs[pi]);
+
+    /* Composite the focus panel's decoration layer (labels, wireframes,
+     * grids, tick marks) on top of the glow so the user retains legend /
+     * offset context in overlay mode. Titles are suppressed by the
+     * renderer in RENDER_DECOR_ONLY — the status bar already names the
+     * view. Focus-panel choice mirrors which file's ranges are shown in
+     * the status bar. */
+    uint32_t *deco = (uint32_t *)calloc(px_count, sizeof(uint32_t));
+    if (deco) {
+        int dpi = app->focus_panel;
+        if (dpi < 0 || dpi >= n) dpi = 0;
+        render_view_pixels(app, dpi, view, cw, ch, deco, RENDER_DECOR_ONLY);
+        for (size_t i = 0; i < px_count; i++) {
+            if (deco[i] & 0xFF000000u) out[i] = deco[i] | 0xFF000000u;
+        }
+        free(deco);
+    }
 
     if (!app->overlay_cache[view]) {
         app->overlay_cache[view] = SDL_CreateTexture(app->renderer,
@@ -485,7 +514,7 @@ static SDL_Texture *ensure_minimap_texture(binmap_app_t *app, int pi, int w)
     if (p->minimap_tex) { SDL_DestroyTexture(p->minimap_tex); p->minimap_tex = NULL; }
     uint32_t *row = (uint32_t *)calloc((size_t)w, sizeof(uint32_t));
     if (!row) return NULL;
-    render_byte_class(row, w, 1, p->file.data, p->file.size, 0, p->file.size);
+    render_byte_class(row, w, 1, p->file.data, p->file.size, 0, p->file.size, RENDER_FULL);
     p->minimap_tex = SDL_CreateTexture(app->renderer,
                                         SDL_PIXELFORMAT_ARGB8888,
                                         SDL_TEXTUREACCESS_STATIC, w, 1);
