@@ -129,12 +129,16 @@ static void draw_offset_rail_right(uint32_t *pixels, int w, int h,
         int ty = y - label_h / 2;
         if (ty < 0) ty = 0;
         if (ty + label_h >= h) ty = h - label_h - 1;
-        /* faint shadow background so text reads over any palette */
+        /* faint shadow background so text reads over any palette. Skip
+         * pixels not yet drawn to (alpha=0): in DECOR_ONLY mode the buffer
+         * is otherwise transparent and a shadow would blot black boxes
+         * behind the label in the overlay composite. */
         for (int by = ty - 1; by < ty + label_h + 1; by++) {
             for (int bx = tx - 1; bx < tx + tw + 1; bx++) {
                 if (bx < 0 || bx >= w || by < 0 || by >= h) continue;
                 uint32_t *p = &pixels[by * w + bx];
                 uint32_t c = *p;
+                if (!(c & 0xFF000000u)) continue;
                 uint8_t r = (uint8_t)((c >> 16) & 0xFF);
                 uint8_t g = (uint8_t)((c >> 8)  & 0xFF);
                 uint8_t b = (uint8_t)( c        & 0xFF);
@@ -151,18 +155,26 @@ static void draw_offset_rail_right(uint32_t *pixels, int w, int h,
 /* ---------- Byte-class stripe ---------- */
 
 void render_byte_class(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
-                       size_t base_offset, size_t file_size)
+                       size_t base_offset, size_t file_size, render_mode_t mode)
 {
     const uint32_t bg = rgb(15, 15, 20);
     uint64_t total = (uint64_t)w * (uint64_t)h;
-    if (size == 0 || total == 0) { fill(pixels, w, h, bg); return; }
-    for (uint64_t i = 0; i < total; i++) {
-        uint64_t bi = (i * size) / total;
-        if (bi >= size) { pixels[i] = bg; continue; }
-        pixels[i] = byte_class_color(data[bi]);
+    if (size == 0 || total == 0) {
+        if (mode == RENDER_FULL) fill(pixels, w, h, bg);
+        return;
+    }
+    if (mode != RENDER_DECOR_ONLY) {
+        for (uint64_t i = 0; i < total; i++) {
+            uint64_t bi = (i * size) / total;
+            if (bi >= size) {
+                if (mode == RENDER_FULL) pixels[i] = bg;
+                continue;
+            }
+            pixels[i] = byte_class_color(data[bi]);
+        }
     }
     /* offset rail is meaningless on the 1-pixel-tall minimap strip */
-    if (h >= 32) {
+    if (mode != RENDER_DATA_ONLY && h >= 32) {
         draw_offset_rail_right(pixels, w, h, w - 2, 2, h - 2,
                                base_offset, size, file_size);
     }
@@ -218,12 +230,13 @@ static void draw_corner_label(uint32_t *pixels, int w, int h,
     else         x = img_x0 + img_size - tw - 2;
     if (cy == 0) y = img_y0 + 2;
     else         y = img_y0 + img_size - th - 2;
-    /* shadow */
+    /* shadow (skip transparent pixels — DECOR_ONLY has none to darken) */
     for (int by = y - 1; by < y + th + 1; by++) {
         for (int bx = x - 1; bx < x + tw + 1; bx++) {
             if (bx < 0 || bx >= w || by < 0 || by >= h) continue;
             uint32_t *p = &pixels[by * w + bx];
             uint32_t c = *p;
+            if (!(c & 0xFF000000u)) continue;
             uint8_t rr = (uint8_t)(((c >> 16) & 0xFF) / 3);
             uint8_t gg = (uint8_t)(((c >> 8)  & 0xFF) / 3);
             uint8_t bb = (uint8_t)(( c        & 0xFF) / 3);
@@ -233,13 +246,67 @@ static void draw_corner_label(uint32_t *pixels, int w, int h,
     blit_text(pixels, w, h, x, y, scale, OVERLAY_LABEL_COLOR, buf);
 }
 
+/* Marker drawn at the curve cell containing the file's final byte, used when
+ * the curve grid is bigger than the data so several corners would otherwise
+ * collapse to the same clamped file-end offset. */
+static void draw_end_marker(uint32_t *pixels, int w, int h,
+                            int img_x0, int img_y0, int img_size, int cell,
+                            int ex, int ey, size_t off, size_t file_size)
+{
+    int px = img_x0 + ex * cell;
+    int py = img_y0 + ey * cell;
+    int pad = 2;
+    int r0 = px - pad;
+    int r1 = px + cell + pad - 1;
+    int rt = py - pad;
+    int rb = py + cell + pad - 1;
+    /* 2px-thick outline ring */
+    draw_hline(pixels, w, h, r0,     r1,     rt,     OVERLAY_TITLE_COLOR);
+    draw_hline(pixels, w, h, r0,     r1,     rb,     OVERLAY_TITLE_COLOR);
+    draw_vline(pixels, w, h, r0,     rt,     rb,     OVERLAY_TITLE_COLOR);
+    draw_vline(pixels, w, h, r1,     rt,     rb,     OVERLAY_TITLE_COLOR);
+    draw_hline(pixels, w, h, r0 + 1, r1 - 1, rt + 1, OVERLAY_TITLE_COLOR);
+    draw_hline(pixels, w, h, r0 + 1, r1 - 1, rb - 1, OVERLAY_TITLE_COLOR);
+    draw_vline(pixels, w, h, r0 + 1, rt + 1, rb - 1, OVERLAY_TITLE_COLOR);
+    draw_vline(pixels, w, h, r1 - 1, rt + 1, rb - 1, OVERLAY_TITLE_COLOR);
+
+    char buf[32];
+    format_hex_offset(buf, sizeof(buf), off, file_size);
+    int scale = 1;
+    int tw = text_width(scale, buf);
+    int th = FONT_H * scale;
+    int label_pad = 4;
+    /* prefer placing label to the right of the marker; fall back to left */
+    int tx = r1 + label_pad + 1;
+    if (tx + tw > img_x0 + img_size - 2) tx = r0 - label_pad - tw;
+    if (tx < img_x0 + 2) tx = img_x0 + 2;
+    int ty = py + cell / 2 - th / 2;
+    if (ty < img_y0 + 2) ty = img_y0 + 2;
+    if (ty + th > img_y0 + img_size - 2) ty = img_y0 + img_size - th - 2;
+    /* shadow box, same recipe as draw_corner_label */
+    for (int by = ty - 1; by < ty + th + 1; by++) {
+        for (int bx = tx - 1; bx < tx + tw + 1; bx++) {
+            if (bx < 0 || bx >= w || by < 0 || by >= h) continue;
+            uint32_t *p = &pixels[by * w + bx];
+            uint32_t c = *p;
+            if (!(c & 0xFF000000u)) continue;
+            uint8_t rr = (uint8_t)(((c >> 16) & 0xFF) / 3);
+            uint8_t gg = (uint8_t)(((c >> 8)  & 0xFF) / 3);
+            uint8_t bb = (uint8_t)(( c        & 0xFF) / 3);
+            *p = rgb(rr, gg, bb);
+        }
+    }
+    blit_text(pixels, w, h, tx, ty, scale, OVERLAY_TITLE_COLOR, buf);
+}
+
 static void render_curve(uint32_t *pixels, int w, int h,
                          const uint8_t *data, size_t size,
                          size_t base_offset, size_t file_size,
+                         render_mode_t mode,
                          void (*d2xy)(int, int, int *, int *))
 {
     const uint32_t bg = rgb(8, 8, 12);
-    fill(pixels, w, h, bg);
+    if (mode == RENDER_FULL) fill(pixels, w, h, bg);
     if (size == 0 || w < 2 || h < 2) return;
 
     int side = (w < h) ? w : h;
@@ -271,6 +338,7 @@ static void render_curve(uint32_t *pixels, int w, int h,
                 corner_found[iy][ix] = true;
             }
         }
+        if (mode == RENDER_DECOR_ONLY) continue;
         uint64_t bs = d * bpc;
         if (bs >= size) continue;
         uint64_t be = bs + bpc;
@@ -288,42 +356,93 @@ static void render_curve(uint32_t *pixels, int w, int h,
         }
     }
 
-    /* corner offset labels */
+    if (mode == RENDER_DATA_ONLY) return;
+
+    /* corner offset labels — skip corners the data never reaches */
     for (int iy = 0; iy < 2; iy++) {
         for (int ix = 0; ix < 2; ix++) {
             if (!corner_found[iy][ix]) continue;
             uint64_t d = corner_d[iy][ix];
+            if (d * bpc >= size) continue;
             size_t off = base_offset + (size_t)(d * bpc);
-            if (off > base_offset + size) off = base_offset + size;
             draw_corner_label(pixels, w, h, ix, iy, ox, oy, img, off, file_size);
         }
+    }
+
+    /* end-of-data marker: only when the curve overshoots the actual data,
+     * so the four-corner labels can't express where the file truly ends */
+    uint64_t d_end = (size - 1) / bpc;
+    if (d_end < total_cells - 1) {
+        int ex = 0, ey = 0;
+        d2xy(n, (int)d_end, &ex, &ey);
+        draw_end_marker(pixels, w, h, ox, oy, img, cell,
+                        ex, ey, base_offset + size, file_size);
     }
 }
 
 void render_hilbert(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
-                    size_t base_offset, size_t file_size)
+                    size_t base_offset, size_t file_size, render_mode_t mode)
 {
-    render_curve(pixels, w, h, data, size, base_offset, file_size, d2xy_hilbert);
+    render_curve(pixels, w, h, data, size, base_offset, file_size, mode, d2xy_hilbert);
+}
+
+/* Inverse of d2xy_hilbert: (cx, cy) -> d on an n x n grid. Mirrors the
+ * rotation/reflection sequence used in d2xy_hilbert exactly. */
+static int xy2d_hilbert(int n, int x, int y)
+{
+    int rx, ry, d = 0;
+    for (int s = n / 2; s > 0; s /= 2) {
+        rx = (x & s) ? 1 : 0;
+        ry = (y & s) ? 1 : 0;
+        d += s * s * ((3 * rx) ^ ry);
+        if (ry == 0) {
+            if (rx == 1) { x = s - 1 - x; y = s - 1 - y; }
+            int tmp = x; x = y; y = tmp;
+        }
+    }
+    return d;
+}
+
+bool render_hilbert_offset_at(int mx, int my, int w, int h,
+                              size_t size, size_t base_offset, size_t *out_off)
+{
+    if (size == 0 || w < 2 || h < 2) return false;
+    int side = (w < h) ? w : h;
+    int n = 1;
+    while ((n * 2) <= side) n *= 2;
+    if (n < 2) return false;
+    int cell = side / n;
+    if (cell < 1) cell = 1;
+    int img = n * cell;
+    int ox = (w - img) / 2;
+    int oy = (h - img) / 2;
+
+    if (mx < ox || mx >= ox + img) return false;
+    if (my < oy || my >= oy + img) return false;
+    int cx = (mx - ox) / cell;
+    int cy = (my - oy) / cell;
+    if (cx < 0 || cx >= n || cy < 0 || cy >= n) return false;
+
+    uint64_t total_cells = (uint64_t)n * (uint64_t)n;
+    uint64_t bpc = (size + total_cells - 1) / total_cells;
+    if (bpc < 1) bpc = 1;
+
+    uint64_t d = (uint64_t)xy2d_hilbert(n, cx, cy);
+    uint64_t cell_off = d * bpc;
+    if (cell_off >= size) return false;
+    if (out_off) *out_off = base_offset + (size_t)cell_off;
+    return true;
 }
 
 /* ---------- Digraph dot plot ---------- */
 
 void render_digraph(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
-                    size_t base_offset, size_t file_size)
+                    size_t base_offset, size_t file_size, render_mode_t mode)
 {
     (void)base_offset; (void)file_size;
     const uint32_t bg = rgb(5, 5, 10);
-    fill(pixels, w, h, bg);
+    if (mode == RENDER_FULL) fill(pixels, w, h, bg);
     if (size < 2) return;
-
-    static uint32_t counts[256 * 256];
-    memset(counts, 0, sizeof(counts));
-    uint32_t max_count = 0;
-    for (size_t i = 0; i + 1 < size; i++) {
-        uint32_t idx = ((uint32_t)data[i] << 8) | data[i + 1];
-        counts[idx]++;
-        if (counts[idx] > max_count) max_count = counts[idx];
-    }
 
     int side = (w < h) ? w : h;
     int cell = side / 256;
@@ -332,31 +451,44 @@ void render_digraph(uint32_t *pixels, int w, int h, const uint8_t *data, size_t 
     int ox = (w - img) / 2;
     int oy = (h - img) / 2;
 
-    double log_max = log((double)max_count + 1.0);
-    if (log_max < 1e-9) log_max = 1.0;
-
     /* faint grid every 0x10 = 16 byte values, drawn beneath the dots */
-    for (int g = 16; g < 256; g += 16) {
-        int gx = ox + g * cell;
-        int gy = oy + g * cell;
-        if (gx >= 0 && gx < w) draw_vline(pixels, w, h, gx, oy, oy + img - 1, OVERLAY_GRID_COLOR);
-        if (gy >= 0 && gy < h) draw_hline(pixels, w, h, ox, ox + img - 1, gy, OVERLAY_GRID_COLOR);
+    if (mode != RENDER_DATA_ONLY) {
+        for (int g = 16; g < 256; g += 16) {
+            int gx = ox + g * cell;
+            int gy = oy + g * cell;
+            if (gx >= 0 && gx < w) draw_vline(pixels, w, h, gx, oy, oy + img - 1, OVERLAY_GRID_COLOR);
+            if (gy >= 0 && gy < h) draw_hline(pixels, w, h, ox, ox + img - 1, gy, OVERLAY_GRID_COLOR);
+        }
     }
 
-    for (int y = 0; y < 256; y++) {
-        for (int x = 0; x < 256; x++) {
-            uint32_t c = counts[y * 256 + x];
-            if (c == 0) continue;
-            double t = log((double)c + 1.0) / log_max;
-            uint32_t color = heat_color(t);
-            int px = ox + x * cell;
-            int py = oy + y * cell;
-            for (int dy = 0; dy < cell; dy++) {
-                uint32_t *row = pixels + (uint64_t)(py + dy) * (uint64_t)w + (uint64_t)px;
-                for (int dx = 0; dx < cell; dx++) row[dx] = color;
+    if (mode != RENDER_DECOR_ONLY) {
+        static uint32_t counts[256 * 256];
+        memset(counts, 0, sizeof(counts));
+        uint32_t max_count = 0;
+        for (size_t i = 0; i + 1 < size; i++) {
+            uint32_t idx = ((uint32_t)data[i] << 8) | data[i + 1];
+            counts[idx]++;
+            if (counts[idx] > max_count) max_count = counts[idx];
+        }
+        double log_max = log((double)max_count + 1.0);
+        if (log_max < 1e-9) log_max = 1.0;
+        for (int y = 0; y < 256; y++) {
+            for (int x = 0; x < 256; x++) {
+                uint32_t c = counts[y * 256 + x];
+                if (c == 0) continue;
+                double t = log((double)c + 1.0) / log_max;
+                uint32_t color = heat_color(t);
+                int px = ox + x * cell;
+                int py = oy + y * cell;
+                for (int dy = 0; dy < cell; dy++) {
+                    uint32_t *row = pixels + (uint64_t)(py + dy) * (uint64_t)w + (uint64_t)px;
+                    for (int dx = 0; dx < cell; dx++) row[dx] = color;
+                }
             }
         }
     }
+
+    if (mode == RENDER_DATA_ONLY) return;
 
     /* axis title + edge labels at every 0x20 along both axes */
     int scale = 1;
@@ -387,8 +519,10 @@ void render_digraph(uint32_t *pixels, int w, int h, const uint8_t *data, size_t 
         if (gy >= 0 && gy < h) draw_hline(pixels, w, h, ox - 3, ox - 1, gy, OVERLAY_TICK_COLOR);
     }
 
-    blit_text(pixels, w, h, ox, oy - label_h - 14, 2, OVERLAY_TITLE_COLOR,
-              "DIGRAPH  X=BYTE[I+1]  Y=BYTE[I]");
+    if (mode == RENDER_FULL) {
+        blit_text(pixels, w, h, ox, oy - label_h - 14, 2, OVERLAY_TITLE_COLOR,
+                  "DIGRAPH  X=BYTE[I+1]  Y=BYTE[I]");
+    }
 }
 
 /* ---------- Entropy heatmap ---------- */
@@ -423,43 +557,47 @@ static uint32_t entropy_color(double e)
 }
 
 void render_entropy(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
-                    size_t base_offset, size_t file_size)
+                    size_t base_offset, size_t file_size, render_mode_t mode)
 {
     const uint32_t bg = rgb(8, 8, 12);
     uint64_t total_px = (uint64_t)w * (uint64_t)h;
-    fill(pixels, w, h, bg);
+    if (mode == RENDER_FULL) fill(pixels, w, h, bg);
     if (size == 0) return;
 
-    size_t chunk = total_px ? size / total_px : 0;
-    if (chunk < 64) chunk = 64;
-    size_t n_chunks = size / chunk;
-    if (n_chunks == 0) return;
-
-    double *e = (double *)malloc(n_chunks * sizeof(double));
-    if (!e) return;
-
-    for (size_t c = 0; c < n_chunks; c++) {
-        uint32_t hist[256] = {0};
-        const uint8_t *p = data + c * chunk;
-        for (size_t i = 0; i < chunk; i++) hist[p[i]]++;
-        double ent = 0.0;
-        double inv = 1.0 / (double)chunk;
-        for (int i = 0; i < 256; i++) {
-            if (!hist[i]) continue;
-            double pp = (double)hist[i] * inv;
-            ent -= pp * log2(pp);
+    if (mode != RENDER_DECOR_ONLY) {
+        size_t chunk = total_px ? size / total_px : 0;
+        if (chunk < 64) chunk = 64;
+        size_t n_chunks = size / chunk;
+        if (n_chunks > 0) {
+            double *e = (double *)malloc(n_chunks * sizeof(double));
+            if (e) {
+                for (size_t c = 0; c < n_chunks; c++) {
+                    uint32_t hist[256] = {0};
+                    const uint8_t *p = data + c * chunk;
+                    for (size_t i = 0; i < chunk; i++) hist[p[i]]++;
+                    double ent = 0.0;
+                    double inv = 1.0 / (double)chunk;
+                    for (int i = 0; i < 256; i++) {
+                        if (!hist[i]) continue;
+                        double pp = (double)hist[i] * inv;
+                        ent -= pp * log2(pp);
+                    }
+                    e[c] = ent;
+                }
+                for (uint64_t i = 0; i < total_px; i++) {
+                    uint64_t ci = (i * n_chunks) / total_px;
+                    if (ci >= n_chunks) {
+                        if (mode == RENDER_FULL) pixels[i] = bg;
+                        continue;
+                    }
+                    pixels[i] = entropy_color(e[ci]);
+                }
+                free(e);
+            }
         }
-        e[c] = ent;
     }
 
-    for (uint64_t i = 0; i < total_px; i++) {
-        uint64_t ci = (i * n_chunks) / total_px;
-        if (ci >= n_chunks) { pixels[i] = bg; continue; }
-        pixels[i] = entropy_color(e[ci]);
-    }
-    free(e);
-
-    if (h >= 32) {
+    if (mode != RENDER_DATA_ONLY && h >= 32) {
         draw_offset_rail_right(pixels, w, h, w - 2, 2, h - 2,
                                base_offset, size, file_size);
     }
@@ -469,13 +607,13 @@ void render_entropy(uint32_t *pixels, int w, int h, const uint8_t *data, size_t 
  * 8 sub-images in a 4x2 grid, one per bit position. */
 
 void render_bit_plane(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
-                      size_t base_offset, size_t file_size)
+                      size_t base_offset, size_t file_size, render_mode_t mode)
 {
     const uint32_t bg     = rgb(15, 15, 20);
     const uint32_t border = rgb(60, 60, 75);
     const uint32_t off    = rgb(20, 20, 28);
     const uint32_t on     = rgb(220, 220, 235);
-    fill(pixels, w, h, bg);
+    if (mode == RENDER_FULL) fill(pixels, w, h, bg);
     if (size == 0 || w < 8 || h < 8) return;
 
     int cols = 4, rows = 2;
@@ -494,47 +632,54 @@ void render_bit_plane(uint32_t *pixels, int w, int h, const uint8_t *data, size_
         if (sw < 4 || sh < 4) continue;
 
         /* border */
-        for (int x = x0 - 1; x < x0 + sw + 1; x++) {
-            if (x < 0 || x >= w) continue;
-            if (y0 - 1 >= 0)             pixels[(y0 - 1) * w + x] = border;
-            if (y0 + sh < h)             pixels[(y0 + sh) * w + x] = border;
-        }
-        for (int y = y0 - 1; y < y0 + sh + 1; y++) {
-            if (y < 0 || y >= h) continue;
-            if (x0 - 1 >= 0)             pixels[y * w + x0 - 1] = border;
-            if (x0 + sw < w)             pixels[y * w + x0 + sw] = border;
-        }
-
-        uint64_t cell_px = (uint64_t)sw * (uint64_t)sh;
-        for (int py = 0; py < sh; py++) {
-            for (int px = 0; px < sw; px++) {
-                uint64_t i = (uint64_t)py * (uint64_t)sw + (uint64_t)px;
-                uint64_t bi = (i * size) / cell_px;
-                if (bi >= size) {
-                    pixels[(y0 + py) * w + (x0 + px)] = bg;
-                    continue;
-                }
-                uint8_t b = data[bi];
-                pixels[(y0 + py) * w + (x0 + px)] = ((b >> bit) & 1) ? on : off;
+        if (mode != RENDER_DATA_ONLY) {
+            for (int x = x0 - 1; x < x0 + sw + 1; x++) {
+                if (x < 0 || x >= w) continue;
+                if (y0 - 1 >= 0)             pixels[(y0 - 1) * w + x] = border;
+                if (y0 + sh < h)             pixels[(y0 + sh) * w + x] = border;
+            }
+            for (int y = y0 - 1; y < y0 + sh + 1; y++) {
+                if (y < 0 || y >= h) continue;
+                if (x0 - 1 >= 0)             pixels[y * w + x0 - 1] = border;
+                if (x0 + sw < w)             pixels[y * w + x0 + sw] = border;
             }
         }
 
-        char label[16];
-        snprintf(label, sizeof(label), "BIT %d", bit);
-        blit_text(pixels, w, h, x0 + 2, y0 + sh + 4, 2, rgb(255, 200, 100), label);
+        if (mode != RENDER_DECOR_ONLY) {
+            uint64_t cell_px = (uint64_t)sw * (uint64_t)sh;
+            for (int py = 0; py < sh; py++) {
+                for (int px = 0; px < sw; px++) {
+                    uint64_t i = (uint64_t)py * (uint64_t)sw + (uint64_t)px;
+                    uint64_t bi = (i * size) / cell_px;
+                    if (bi >= size) {
+                        if (mode == RENDER_FULL)
+                            pixels[(y0 + py) * w + (x0 + px)] = bg;
+                        continue;
+                    }
+                    uint8_t b = data[bi];
+                    pixels[(y0 + py) * w + (x0 + px)] = ((b >> bit) & 1) ? on : off;
+                }
+            }
+        }
 
-        /* corner offsets on the first panel only — applies to all panels */
-        if (bit == 0) {
-            char start_buf[32], end_buf[32];
-            format_hex_offset(start_buf, sizeof(start_buf), base_offset, file_size);
-            format_hex_offset(end_buf,   sizeof(end_buf),   base_offset + size, file_size);
-            blit_text(pixels, w, h, x0 + 2, y0 + 2, 1, OVERLAY_LABEL_COLOR, start_buf);
-            int ew = text_width(1, end_buf);
-            int ex = x0 + sw - ew - 2;
-            int ey = y0 + sh - FONT_H - 2;
-            if (ex < x0 + 2) ex = x0 + 2;
-            if (ey < y0 + 2) ey = y0 + 2;
-            blit_text(pixels, w, h, ex, ey, 1, OVERLAY_LABEL_COLOR, end_buf);
+        if (mode != RENDER_DATA_ONLY) {
+            char label[16];
+            snprintf(label, sizeof(label), "BIT %d", bit);
+            blit_text(pixels, w, h, x0 + 2, y0 + sh + 4, 2, OVERLAY_TITLE_COLOR, label);
+
+            /* corner offsets on the first panel only — applies to all panels */
+            if (bit == 0) {
+                char start_buf[32], end_buf[32];
+                format_hex_offset(start_buf, sizeof(start_buf), base_offset, file_size);
+                format_hex_offset(end_buf,   sizeof(end_buf),   base_offset + size, file_size);
+                blit_text(pixels, w, h, x0 + 2, y0 + 2, 1, OVERLAY_LABEL_COLOR, start_buf);
+                int ew = text_width(1, end_buf);
+                int ex = x0 + sw - ew - 2;
+                int ey = y0 + sh - FONT_H - 2;
+                if (ex < x0 + 2) ex = x0 + 2;
+                if (ey < y0 + 2) ey = y0 + 2;
+                blit_text(pixels, w, h, ex, ey, 1, OVERLAY_LABEL_COLOR, end_buf);
+            }
         }
     }
 }
@@ -547,66 +692,69 @@ static inline bool is_printable(uint8_t b) { return b >= 0x20 && b < 0x7F; }
 
 void render_strings_density(uint32_t *pixels, int w, int h,
                             const uint8_t *data, size_t size,
-                            size_t base_offset, size_t file_size)
+                            size_t base_offset, size_t file_size, render_mode_t mode)
 {
     const uint32_t bg = rgb(8, 8, 14);
-    fill(pixels, w, h, bg);
+    if (mode == RENDER_FULL) fill(pixels, w, h, bg);
     if (size == 0) return;
 
-    uint64_t total = (uint64_t)w * (uint64_t)h;
-    size_t chunk = total ? size / total : 0;
-    if (chunk < 64) chunk = 64;
-    size_t n_chunks = size / chunk;
-    if (n_chunks == 0) return;
-
-    double *density = (double *)malloc(n_chunks * sizeof(double));
-    if (!density) return;
-
-    for (size_t c = 0; c < n_chunks; c++) {
-        const uint8_t *p = data + c * chunk;
-        size_t in_str = 0;
-        size_t run = 0;
-        for (size_t i = 0; i < chunk; i++) {
-            if (is_printable(p[i])) {
-                run++;
-            } else {
-                if (run >= 4) in_str += run;
-                run = 0;
+    if (mode != RENDER_DECOR_ONLY) {
+        uint64_t total = (uint64_t)w * (uint64_t)h;
+        size_t chunk = total ? size / total : 0;
+        if (chunk < 64) chunk = 64;
+        size_t n_chunks = size / chunk;
+        if (n_chunks > 0) {
+            double *density = (double *)malloc(n_chunks * sizeof(double));
+            if (density) {
+                for (size_t c = 0; c < n_chunks; c++) {
+                    const uint8_t *p = data + c * chunk;
+                    size_t in_str = 0;
+                    size_t run = 0;
+                    for (size_t i = 0; i < chunk; i++) {
+                        if (is_printable(p[i])) {
+                            run++;
+                        } else {
+                            if (run >= 4) in_str += run;
+                            run = 0;
+                        }
+                    }
+                    if (run >= 4) in_str += run;
+                    density[c] = (double)in_str / (double)chunk;
+                }
+                /* black -> dim orange -> yellow -> white */
+                for (uint64_t i = 0; i < total; i++) {
+                    uint64_t ci = (i * n_chunks) / total;
+                    if (ci >= n_chunks) continue;
+                    double t = density[ci];
+                    if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
+                    int r, g, b;
+                    if (t < 0.5) {
+                        double k = t / 0.5;
+                        r = (int)(240 * k);
+                        g = (int)(140 * k);
+                        b = (int)(20 * k);
+                    } else {
+                        double k = (t - 0.5) / 0.5;
+                        r = (int)(240 + 15 * k);
+                        g = (int)(140 + 110 * k);
+                        b = (int)(20 + 220 * k);
+                    }
+                    pixels[i] = rgb(clamp_u8(r), clamp_u8(g), clamp_u8(b));
+                }
+                free(density);
             }
         }
-        if (run >= 4) in_str += run;
-        density[c] = (double)in_str / (double)chunk;
     }
 
-    /* black -> dim orange -> yellow -> white */
-    for (uint64_t i = 0; i < total; i++) {
-        uint64_t ci = (i * n_chunks) / total;
-        if (ci >= n_chunks) continue;
-        double t = density[ci];
-        if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
-        int r, g, b;
-        if (t < 0.5) {
-            double k = t / 0.5;
-            r = (int)(240 * k);
-            g = (int)(140 * k);
-            b = (int)(20 * k);
-        } else {
-            double k = (t - 0.5) / 0.5;
-            r = (int)(240 + 15 * k);
-            g = (int)(140 + 110 * k);
-            b = (int)(20 + 220 * k);
-        }
-        pixels[i] = rgb(clamp_u8(r), clamp_u8(g), clamp_u8(b));
-    }
-    free(density);
-
-    if (h >= 32) {
+    if (mode != RENDER_DATA_ONLY && h >= 32) {
         draw_offset_rail_right(pixels, w, h, w - 2, 2, h - 2,
                                base_offset, size, file_size);
     }
 
-    blit_text(pixels, w, h, 8, 4, 2, rgb(255, 200, 100),
-              "STRINGS DENSITY (ASCII RUNS >= 4)");
+    if (mode == RENDER_FULL) {
+        blit_text(pixels, w, h, 8, 4, 2, OVERLAY_TITLE_COLOR,
+                  "STRINGS DENSITY (ASCII RUNS >= 4)");
+    }
 }
 
 /* ---------- Self-similarity matrix ----------
@@ -616,10 +764,10 @@ void render_strings_density(uint32_t *pixels, int w, int h,
 
 void render_self_similarity(uint32_t *pixels, int w, int h,
                             const uint8_t *data, size_t size,
-                            size_t base_offset, size_t file_size)
+                            size_t base_offset, size_t file_size, render_mode_t mode)
 {
     const uint32_t bg = rgb(8, 8, 14);
-    fill(pixels, w, h, bg);
+    if (mode == RENDER_FULL) fill(pixels, w, h, bg);
     if (size < 256 || w < 80 || h < 80) return;
 
     int side = (w < h) ? w : h;
@@ -634,57 +782,63 @@ void render_self_similarity(uint32_t *pixels, int w, int h,
     size_t chunk_size = size / (size_t)N;
     if (chunk_size == 0) chunk_size = 1;
 
-    uint32_t (*hists)[256] = (uint32_t (*)[256])
-                              calloc((size_t)N, sizeof(uint32_t[256]));
-    if (!hists) return;
-    for (int c = 0; c < N; c++) {
-        const uint8_t *p = data + (size_t)c * chunk_size;
-        for (size_t i = 0; i < chunk_size; i++) hists[c][p[i]]++;
-    }
-
-    uint32_t *dist = (uint32_t *)malloc((size_t)N * (size_t)N * sizeof(uint32_t));
-    if (!dist) { free(hists); return; }
-    uint32_t max_d = 1;
-    for (int a = 0; a < N; a++) {
-        dist[a * N + a] = 0;
-        for (int b = a + 1; b < N; b++) {
-            uint32_t d = 0;
-            for (int i = 0; i < 256; i++) {
-                int32_t diff = (int32_t)hists[a][i] - (int32_t)hists[b][i];
-                d += (uint32_t)(diff < 0 ? -diff : diff);
-            }
-            dist[a * N + b] = d;
-            dist[b * N + a] = d;
-            if (d > max_d) max_d = d;
-        }
-    }
-
     int cell = side / N;
     if (cell < 1) cell = 1;
     int img = N * cell;
     int ox = (w - img) / 2;
     int oy = (h - img) / 2;
 
-    double inv_max = 1.0 / (double)max_d;
-    for (int a = 0; a < N; a++) {
-        for (int b = 0; b < N; b++) {
-            uint32_t d = dist[a * N + b];
-            double t = 1.0 - (double)d * inv_max;   /* similarity 0..1 */
-            uint32_t color = heat_color(t);
-            int px = ox + b * cell;
-            int py = oy + a * cell;
-            for (int dy = 0; dy < cell; dy++) {
-                uint32_t *row = pixels + (uint64_t)(py + dy) * (uint64_t)w + (uint64_t)px;
-                for (int dx = 0; dx < cell; dx++) row[dx] = color;
+    if (mode != RENDER_DECOR_ONLY) {
+        uint32_t (*hists)[256] = (uint32_t (*)[256])
+                                  calloc((size_t)N, sizeof(uint32_t[256]));
+        if (hists) {
+            for (int c = 0; c < N; c++) {
+                const uint8_t *p = data + (size_t)c * chunk_size;
+                for (size_t i = 0; i < chunk_size; i++) hists[c][p[i]]++;
             }
+            uint32_t *dist = (uint32_t *)malloc((size_t)N * (size_t)N * sizeof(uint32_t));
+            if (dist) {
+                uint32_t max_d = 1;
+                for (int a = 0; a < N; a++) {
+                    dist[a * N + a] = 0;
+                    for (int b = a + 1; b < N; b++) {
+                        uint32_t d = 0;
+                        for (int i = 0; i < 256; i++) {
+                            int32_t diff = (int32_t)hists[a][i] - (int32_t)hists[b][i];
+                            d += (uint32_t)(diff < 0 ? -diff : diff);
+                        }
+                        dist[a * N + b] = d;
+                        dist[b * N + a] = d;
+                        if (d > max_d) max_d = d;
+                    }
+                }
+                double inv_max = 1.0 / (double)max_d;
+                for (int a = 0; a < N; a++) {
+                    for (int b = 0; b < N; b++) {
+                        uint32_t d = dist[a * N + b];
+                        double t = 1.0 - (double)d * inv_max;   /* similarity 0..1 */
+                        uint32_t color = heat_color(t);
+                        int px = ox + b * cell;
+                        int py = oy + a * cell;
+                        for (int dy = 0; dy < cell; dy++) {
+                            uint32_t *row = pixels + (uint64_t)(py + dy) * (uint64_t)w + (uint64_t)px;
+                            for (int dx = 0; dx < cell; dx++) row[dx] = color;
+                        }
+                    }
+                }
+                free(dist);
+            }
+            free(hists);
         }
     }
-    free(dist);
-    free(hists);
+
+    if (mode == RENDER_DATA_ONLY) return;
 
     /* title + offset ticks on top (x axis) and left (y axis) */
-    blit_text(pixels, w, h, ox, oy - FONT_H * 2 - 6, 2, rgb(255, 200, 100),
-              "SELF-SIMILARITY (HISTOGRAM L1 DISTANCE)");
+    if (mode == RENDER_FULL) {
+        blit_text(pixels, w, h, ox, oy - FONT_H * 2 - 6, 2, OVERLAY_TITLE_COLOR,
+                  "SELF-SIMILARITY (HISTOGRAM L1 DISTANCE)");
+    }
 
     int scale = 1;
     int th = FONT_H * scale;
@@ -721,30 +875,37 @@ void render_self_similarity(uint32_t *pixels, int w, int h,
  * Files containing embedded bitmaps (raw textures, dumps) literally show up. */
 
 void render_rgb_raw(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
-                    size_t base_offset, size_t file_size)
+                    size_t base_offset, size_t file_size, render_mode_t mode)
 {
     const uint32_t bg = rgb(8, 8, 14);
-    fill(pixels, w, h, bg);
+    if (mode == RENDER_FULL) fill(pixels, w, h, bg);
     if (size < 3) return;
 
-    uint64_t total = (uint64_t)w * (uint64_t)h;
-    size_t n_triples = size / 3;
-    if (n_triples == 0) return;
-
-    for (uint64_t i = 0; i < total; i++) {
-        uint64_t ti = (i * n_triples) / total;
-        if (ti >= n_triples) { pixels[i] = bg; continue; }
-        size_t off = ti * 3;
-        pixels[i] = rgb(data[off], data[off + 1], data[off + 2]);
+    if (mode != RENDER_DECOR_ONLY) {
+        uint64_t total = (uint64_t)w * (uint64_t)h;
+        size_t n_triples = size / 3;
+        if (n_triples > 0) {
+            for (uint64_t i = 0; i < total; i++) {
+                uint64_t ti = (i * n_triples) / total;
+                if (ti >= n_triples) {
+                    if (mode == RENDER_FULL) pixels[i] = bg;
+                    continue;
+                }
+                size_t off = ti * 3;
+                pixels[i] = rgb(data[off], data[off + 1], data[off + 2]);
+            }
+        }
     }
 
-    if (h >= 32) {
+    if (mode != RENDER_DATA_ONLY && h >= 32) {
         draw_offset_rail_right(pixels, w, h, w - 2, 2, h - 2,
                                base_offset, size, file_size);
     }
 
-    blit_text(pixels, w, h, 8, 4, 2, rgb(255, 200, 100),
-              "RGB RAW (3 BYTES PER PIXEL)");
+    if (mode == RENDER_FULL) {
+        blit_text(pixels, w, h, 8, 4, 2, OVERLAY_TITLE_COLOR,
+                  "RGB RAW (3 BYTES PER PIXEL)");
+    }
 }
 
 /* ---------- 3D helpers ---------- */
@@ -791,15 +952,12 @@ static void draw_line_pix(uint32_t *pixels, int w, int h,
 
 void render_trigraph(uint32_t *pixels, int w, int h, const uint8_t *data, size_t size,
                      size_t base_offset, size_t file_size,
-                     float yaw, float pitch, float zoom)
+                     float yaw, float pitch, float zoom, render_mode_t mode)
 {
     (void)base_offset; (void)file_size;
     const uint32_t bg = rgb(4, 4, 10);
-    fill(pixels, w, h, bg);
+    if (mode == RENDER_FULL) fill(pixels, w, h, bg);
     if (size < 3 || w < 16 || h < 16) return;
-
-    uint32_t *counts = (uint32_t *)calloc((size_t)w * (size_t)h, sizeof(uint32_t));
-    if (!counts) return;
 
     float cy = cosf(yaw),   sy = sinf(yaw);
     float cp = cosf(pitch), sp = sinf(pitch);
@@ -824,43 +982,53 @@ void render_trigraph(uint32_t *pixels, int w, int h, const uint8_t *data, size_t
                            cy, sy, cp, sp, cam_d, f, ox, oo,
                            &pv[i][0], &pv[i][1]);
     }
-    uint32_t cube_col = rgb(60, 60, 90);
-    for (int i = 0; i < 12; i++) {
-        if (!ok[ce[i][0]] || !ok[ce[i][1]]) continue;
-        draw_line_pix(pixels, w, h,
-                      pv[ce[i][0]][0], pv[ce[i][0]][1],
-                      pv[ce[i][1]][0], pv[ce[i][1]][1],
-                      cube_col);
-    }
 
-    /* sample triples */
-    size_t step = 1;
-    size_t cap = 400000;
-    size_t triples = size - 2;
-    if (triples > cap) step = triples / cap;
-
-    uint32_t max_c = 0;
-    for (size_t i = 0; i + 2 < size; i += step) {
-        float xx = ((float)data[i]     / 127.5f) - 1.0f;
-        float yy = ((float)data[i + 1] / 127.5f) - 1.0f;
-        float zz = ((float)data[i + 2] / 127.5f) - 1.0f;
-        float sxp, syp;
-        if (!project_pt(xx, yy, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) continue;
-        plot_pt(counts, w, h, (int)sxp, (int)syp, &max_c);
-    }
-
-    if (max_c > 0) {
-        double log_max = log((double)max_c + 1.0);
-        if (log_max < 1e-9) log_max = 1.0;
-        uint64_t n = (uint64_t)w * (uint64_t)h;
-        for (uint64_t i = 0; i < n; i++) {
-            uint32_t c = counts[i];
-            if (c == 0) continue;
-            double t = log((double)c + 1.0) / log_max;
-            pixels[i] = heat_color(t);
+    if (mode != RENDER_DATA_ONLY) {
+        uint32_t cube_col = rgb(60, 60, 90);
+        for (int i = 0; i < 12; i++) {
+            if (!ok[ce[i][0]] || !ok[ce[i][1]]) continue;
+            draw_line_pix(pixels, w, h,
+                          pv[ce[i][0]][0], pv[ce[i][0]][1],
+                          pv[ce[i][1]][0], pv[ce[i][1]][1],
+                          cube_col);
         }
     }
-    free(counts);
+
+    if (mode != RENDER_DECOR_ONLY) {
+        uint32_t *counts = (uint32_t *)calloc((size_t)w * (size_t)h, sizeof(uint32_t));
+        if (counts) {
+            /* sample triples */
+            size_t step = 1;
+            size_t cap = 400000;
+            size_t triples = size - 2;
+            if (triples > cap) step = triples / cap;
+
+            uint32_t max_c = 0;
+            for (size_t i = 0; i + 2 < size; i += step) {
+                float xx = ((float)data[i]     / 127.5f) - 1.0f;
+                float yy = ((float)data[i + 1] / 127.5f) - 1.0f;
+                float zz = ((float)data[i + 2] / 127.5f) - 1.0f;
+                float sxp, syp;
+                if (!project_pt(xx, yy, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) continue;
+                plot_pt(counts, w, h, (int)sxp, (int)syp, &max_c);
+            }
+
+            if (max_c > 0) {
+                double log_max = log((double)max_c + 1.0);
+                if (log_max < 1e-9) log_max = 1.0;
+                uint64_t n = (uint64_t)w * (uint64_t)h;
+                for (uint64_t i = 0; i < n; i++) {
+                    uint32_t c = counts[i];
+                    if (c == 0) continue;
+                    double t = log((double)c + 1.0) / log_max;
+                    pixels[i] = heat_color(t);
+                }
+            }
+            free(counts);
+        }
+    }
+
+    if (mode == RENDER_DATA_ONLY) return;
 
     /* label each visible cube corner with its (a,b,c) value */
     for (int i = 0; i < 8; i++) {
@@ -884,8 +1052,10 @@ void render_trigraph(uint32_t *pixels, int w, int h, const uint8_t *data, size_t
         blit_text(pixels, w, h, lx, ly, scale, OVERLAY_LABEL_COLOR, buf);
     }
 
-    blit_text(pixels, w, h, 8, 4, 2, rgb(255, 200, 100),
-              "TRIGRAPH (BYTE TRIPLES IN 0..255 CUBE)");
+    if (mode == RENDER_FULL) {
+        blit_text(pixels, w, h, 8, 4, 2, OVERLAY_TITLE_COLOR,
+                  "TRIGRAPH (BYTE TRIPLES IN 0..255 CUBE)");
+    }
 }
 
 /* ---------- Spherical trigraph (Veles-style) ----------
@@ -899,15 +1069,12 @@ void render_trigraph(uint32_t *pixels, int w, int h, const uint8_t *data, size_t
 void render_trigraph_spherical(uint32_t *pixels, int w, int h,
                                const uint8_t *data, size_t size,
                                size_t base_offset, size_t file_size,
-                               float yaw, float pitch, float zoom)
+                               float yaw, float pitch, float zoom, render_mode_t mode)
 {
     (void)base_offset; (void)file_size;
     const uint32_t bg = rgb(4, 4, 10);
-    fill(pixels, w, h, bg);
+    if (mode == RENDER_FULL) fill(pixels, w, h, bg);
     if (size < 3 || w < 16 || h < 16) return;
-
-    uint32_t *counts = (uint32_t *)calloc((size_t)w * (size_t)h, sizeof(uint32_t));
-    if (!counts) return;
 
     float cy = cosf(yaw),   sy = sinf(yaw);
     float cp = cosf(pitch), sp = sinf(pitch);
@@ -924,80 +1091,89 @@ void render_trigraph_spherical(uint32_t *pixels, int w, int h,
         cos_ph[i] = cosf(ph); sin_ph[i] = sinf(ph);
     }
 
-    /* wireframe: equator + two perpendicular meridians */
-    uint32_t wire_col = rgb(60, 60, 90);
-    const int segs = 96;
-    float pp_x = 0, pp_y = 0; bool have_prev;
+    if (mode != RENDER_DATA_ONLY) {
+        /* wireframe: equator + two perpendicular meridians */
+        uint32_t wire_col = rgb(60, 60, 90);
+        const int segs = 96;
+        float pp_x = 0, pp_y = 0; bool have_prev;
 
-    /* equator (phi = pi/2, varying theta) -> in XZ plane, y = 0 */
-    have_prev = false;
-    for (int s = 0; s <= segs; s++) {
-        float th = (float)s * (2.0f * (float)M_PI / (float)segs);
-        float xx = cosf(th), yy = 0.0f, zz = sinf(th);
-        float sxp, syp;
-        if (!project_pt(xx, yy, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) {
-            have_prev = false; continue;
+        /* equator (phi = pi/2, varying theta) -> in XZ plane, y = 0 */
+        have_prev = false;
+        for (int s = 0; s <= segs; s++) {
+            float th = (float)s * (2.0f * (float)M_PI / (float)segs);
+            float xx = cosf(th), yy = 0.0f, zz = sinf(th);
+            float sxp, syp;
+            if (!project_pt(xx, yy, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) {
+                have_prev = false; continue;
+            }
+            if (have_prev) draw_line_pix(pixels, w, h, pp_x, pp_y, sxp, syp, wire_col);
+            pp_x = sxp; pp_y = syp; have_prev = true;
         }
-        if (have_prev) draw_line_pix(pixels, w, h, pp_x, pp_y, sxp, syp, wire_col);
-        pp_x = sxp; pp_y = syp; have_prev = true;
-    }
-    /* meridian theta = 0 -> circle in Y-Z plane */
-    have_prev = false;
-    for (int s = 0; s <= segs; s++) {
-        float ph = (float)s * (2.0f * (float)M_PI / (float)segs);
-        float xx = 0.0f, yy = cosf(ph), zz = sinf(ph);
-        float sxp, syp;
-        if (!project_pt(xx, yy, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) {
-            have_prev = false; continue;
+        /* meridian theta = 0 -> circle in Y-Z plane */
+        have_prev = false;
+        for (int s = 0; s <= segs; s++) {
+            float ph = (float)s * (2.0f * (float)M_PI / (float)segs);
+            float xx = 0.0f, yy = cosf(ph), zz = sinf(ph);
+            float sxp, syp;
+            if (!project_pt(xx, yy, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) {
+                have_prev = false; continue;
+            }
+            if (have_prev) draw_line_pix(pixels, w, h, pp_x, pp_y, sxp, syp, wire_col);
+            pp_x = sxp; pp_y = syp; have_prev = true;
         }
-        if (have_prev) draw_line_pix(pixels, w, h, pp_x, pp_y, sxp, syp, wire_col);
-        pp_x = sxp; pp_y = syp; have_prev = true;
-    }
-    /* meridian theta = pi/2 -> circle in X-Y plane */
-    have_prev = false;
-    for (int s = 0; s <= segs; s++) {
-        float ph = (float)s * (2.0f * (float)M_PI / (float)segs);
-        float xx = sinf(ph), yy = cosf(ph), zz = 0.0f;
-        float sxp, syp;
-        if (!project_pt(xx, yy, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) {
-            have_prev = false; continue;
-        }
-        if (have_prev) draw_line_pix(pixels, w, h, pp_x, pp_y, sxp, syp, wire_col);
-        pp_x = sxp; pp_y = syp; have_prev = true;
-    }
-
-    /* sample triples */
-    size_t step = 1;
-    size_t cap = 400000;
-    size_t triples = size - 2;
-    if (triples > cap) step = triples / cap;
-
-    uint32_t max_c = 0;
-    for (size_t i = 0; i + 2 < size; i += step) {
-        uint8_t a = data[i];
-        uint8_t b = data[i + 1];
-        uint8_t c = data[i + 2];
-        float r = (float)c * (1.0f / 255.0f);
-        float xx = r * sin_ph[b] * cos_th[a];
-        float yy = r * cos_ph[b];
-        float zz = r * sin_ph[b] * sin_th[a];
-        float sxp, syp;
-        if (!project_pt(xx, yy, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) continue;
-        plot_pt(counts, w, h, (int)sxp, (int)syp, &max_c);
-    }
-
-    if (max_c > 0) {
-        double log_max = log((double)max_c + 1.0);
-        if (log_max < 1e-9) log_max = 1.0;
-        uint64_t n = (uint64_t)w * (uint64_t)h;
-        for (uint64_t i = 0; i < n; i++) {
-            uint32_t c = counts[i];
-            if (c == 0) continue;
-            double t = log((double)c + 1.0) / log_max;
-            pixels[i] = heat_color(t);
+        /* meridian theta = pi/2 -> circle in X-Y plane */
+        have_prev = false;
+        for (int s = 0; s <= segs; s++) {
+            float ph = (float)s * (2.0f * (float)M_PI / (float)segs);
+            float xx = sinf(ph), yy = cosf(ph), zz = 0.0f;
+            float sxp, syp;
+            if (!project_pt(xx, yy, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) {
+                have_prev = false; continue;
+            }
+            if (have_prev) draw_line_pix(pixels, w, h, pp_x, pp_y, sxp, syp, wire_col);
+            pp_x = sxp; pp_y = syp; have_prev = true;
         }
     }
-    free(counts);
+
+    if (mode != RENDER_DECOR_ONLY) {
+        uint32_t *counts = (uint32_t *)calloc((size_t)w * (size_t)h, sizeof(uint32_t));
+        if (counts) {
+            /* sample triples */
+            size_t step = 1;
+            size_t cap = 400000;
+            size_t triples = size - 2;
+            if (triples > cap) step = triples / cap;
+
+            uint32_t max_c = 0;
+            for (size_t i = 0; i + 2 < size; i += step) {
+                uint8_t a = data[i];
+                uint8_t b = data[i + 1];
+                uint8_t c = data[i + 2];
+                float r = (float)c * (1.0f / 255.0f);
+                float xx = r * sin_ph[b] * cos_th[a];
+                float yy = r * cos_ph[b];
+                float zz = r * sin_ph[b] * sin_th[a];
+                float sxp, syp;
+                if (!project_pt(xx, yy, zz, cy, sy, cp, sp, cam_d, f, ox, oo, &sxp, &syp)) continue;
+                plot_pt(counts, w, h, (int)sxp, (int)syp, &max_c);
+            }
+
+            if (max_c > 0) {
+                double log_max = log((double)max_c + 1.0);
+                if (log_max < 1e-9) log_max = 1.0;
+                uint64_t n = (uint64_t)w * (uint64_t)h;
+                for (uint64_t i = 0; i < n; i++) {
+                    uint32_t c = counts[i];
+                    if (c == 0) continue;
+                    double t = log((double)c + 1.0) / log_max;
+                    pixels[i] = heat_color(t);
+                }
+            }
+            free(counts);
+        }
+    }
+
+    if (mode == RENDER_DATA_ONLY) return;
 
     /* anchor labels at sphere axes */
     {
@@ -1027,6 +1203,8 @@ void render_trigraph_spherical(uint32_t *pixels, int w, int h,
         }
     }
 
-    blit_text(pixels, w, h, 8, 4, 2, rgb(255, 200, 100),
-              "SPHERICAL TRIGRAPH (THETA=A PHI=B R=C)");
+    if (mode == RENDER_FULL) {
+        blit_text(pixels, w, h, 8, 4, 2, OVERLAY_TITLE_COLOR,
+                  "SPHERICAL TRIGRAPH (THETA=A PHI=B R=C)");
+    }
 }
