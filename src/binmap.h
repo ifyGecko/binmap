@@ -37,7 +37,8 @@ typedef enum {
 
 typedef enum {
     MODE_SPLIT = 0,
-    MODE_FOCUS
+    MODE_FOCUS,
+    MODE_OVERLAY   /* all panels blended into one agreement-heat image */
 } display_mode_t;
 
 /* Per-file state. Everything cached, dragged, or hovered is per-panel. */
@@ -70,6 +71,11 @@ typedef struct {
     int active_panel;      /* last hovered / selected — receives keyboard range nudges in split */
     int focus_panel;       /* which panel fills the canvas in MODE_FOCUS */
     display_mode_t mode;
+    display_mode_t prev_mode;   /* mode to restore when leaving overlay */
+    int            overlay_scheme;   /* 0 = off; 1..N = active scheme */
+    /* Overlay-mode cache — one texture per view, composed from all panels */
+    SDL_Texture   *overlay_cache[VIEW_COUNT];
+    int            overlay_cache_w, overlay_cache_h;
     bool show_thumb_strip; /* only meaningful in MODE_FOCUS */
     bool show_legend;
     bool show_description;

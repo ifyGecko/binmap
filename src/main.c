@@ -142,6 +142,7 @@ static const struct {
     {"TAB",     "NEXT VIEW"},
     {"SHF-TAB", "PREV VIEW"},
     {"F",       "FOCUS/SPLIT"},
+    {"H",       "HEAT CYCLE"},
     {"C-TAB",   "CYCLE PANEL"},
     {"1-9",     "PICK PANEL"},
     {"M",       "THUMB STRIP"},
@@ -236,19 +237,13 @@ static void invalidate_3d_caches(binmap_app_t *app)
     }
 }
 
-static SDL_Texture *ensure_view_texture(binmap_app_t *app, int pi,
-                                        view_id_t view, int cw, int ch)
+/* Render one panel's current view into a caller-provided pixel buffer.
+ * Shared by ensure_view_texture (single-panel path) and ensure_overlay_texture
+ * (blends N panels' buffers together). */
+static void render_view_pixels(binmap_app_t *app, int pi, view_id_t view,
+                               int cw, int ch, uint32_t *pixels)
 {
     binmap_panel_t *p = &app->panels[pi];
-    if (cw < 1 || ch < 1) return NULL;
-    if (p->cache_w != cw || p->cache_h != ch) free_panel_caches(app, pi);
-
-    bool is_3d = view_is_3d(view);
-    if (!is_3d && p->cache[view]) return p->cache[view];
-
-    uint32_t *pixels = (uint32_t *)calloc((size_t)cw * (size_t)ch, sizeof(uint32_t));
-    if (!pixels) return NULL;
-
     const uint8_t *d  = p->file.data + p->range_start;
     size_t         s  = p->range_end - p->range_start;
     size_t         bo = p->range_start;
@@ -270,8 +265,23 @@ static SDL_Texture *ensure_view_texture(binmap_app_t *app, int pi,
         render_trigraph_spherical(pixels, cw, ch, d, s, bo, fs,
                                   app->yaw, app->pitch, app->zoom);
         break;
-    default: free(pixels); return NULL;
+    default: break;
     }
+}
+
+static SDL_Texture *ensure_view_texture(binmap_app_t *app, int pi,
+                                        view_id_t view, int cw, int ch)
+{
+    binmap_panel_t *p = &app->panels[pi];
+    if (cw < 1 || ch < 1) return NULL;
+    if (p->cache_w != cw || p->cache_h != ch) free_panel_caches(app, pi);
+
+    bool is_3d = view_is_3d(view);
+    if (!is_3d && p->cache[view]) return p->cache[view];
+
+    uint32_t *pixels = (uint32_t *)calloc((size_t)cw * (size_t)ch, sizeof(uint32_t));
+    if (!pixels) return NULL;
+    render_view_pixels(app, pi, view, cw, ch, pixels);
 
     if (!p->cache[view]) {
         p->cache[view] = SDL_CreateTexture(app->renderer,
@@ -285,6 +295,246 @@ static SDL_Texture *ensure_view_texture(binmap_app_t *app, int pi,
     p->cache_w = cw;
     p->cache_h = ch;
     return p->cache[view];
+}
+
+/* ---------- overlay cache ---------- */
+
+static void invalidate_overlay_caches(binmap_app_t *app)
+{
+    for (int i = 0; i < VIEW_COUNT; i++) {
+        if (app->overlay_cache[i]) {
+            SDL_DestroyTexture(app->overlay_cache[i]);
+            app->overlay_cache[i] = NULL;
+        }
+    }
+    app->overlay_cache_w = app->overlay_cache_h = 0;
+}
+
+static void invalidate_overlay_3d_caches(binmap_app_t *app)
+{
+    for (int i = 0; i < VIEW_COUNT; i++) {
+        if (view_is_3d((view_id_t)i) && app->overlay_cache[i]) {
+            SDL_DestroyTexture(app->overlay_cache[i]);
+            app->overlay_cache[i] = NULL;
+        }
+    }
+}
+
+/* Overlay colour schemes.  H cycles 0 (off) -> 1..NUM -> 0. */
+#define NUM_OVERLAY_SCHEMES 5
+
+static const char *overlay_scheme_names[NUM_OVERLAY_SCHEMES + 1] = {
+    "OFF",
+    "AGREEMENT COLOR",   /* mean_color * agreement, preserves file colours */
+    "AGREEMENT HEAT",    /* heat_color(agreement), bright = files match */
+    "DIFFERENCE HEAT",   /* heat_color(1 - agreement), bright = files diverge */
+    "CHANNEL SPLIT",     /* per-file hue on wheel, additive — RGB for N<=3 */
+    "MAX BLEND",         /* per-channel max — union of features */
+};
+
+/* Any per-panel pixel darker than this in all three channels is treated as
+ * "background" for that panel. Covers the darkest palettes in render.c:
+ * (4,4,10) (5,5,10) (8,8,12) (8,8,14) (15,15,20) (20,20,30). */
+#define BG_CHANNEL_MAX 32
+/* Colour output for pixels ALL panels agree are background. */
+#define BG_FLAT_R 8
+#define BG_FLAT_G 8
+#define BG_FLAT_B 12
+
+static inline uint32_t rgb_u32(int r, int g, int b)
+{
+    if (r < 0)   r = 0;
+    if (r > 255) r = 255;
+    if (g < 0)   g = 0;
+    if (g > 255) g = 255;
+    if (b < 0)   b = 0;
+    if (b > 255) b = 255;
+    return 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+}
+
+/* Duplicate of the heat palette in render.c so overlay code doesn't depend on
+ * it privately. */
+static uint32_t heat_color_local(float t)
+{
+    if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+    int r, g, b;
+    if (t < 0.33f) {
+        float k = t / 0.33f;
+        r = 0;
+        g = (int)(80.0f * k);
+        b = (int)(80.0f + 175.0f * k);
+    } else if (t < 0.66f) {
+        float k = (t - 0.33f) / 0.33f;
+        r = (int)(255.0f * k);
+        g = (int)(80.0f + 175.0f * k);
+        b = (int)(255.0f - 100.0f * k);
+    } else {
+        float k = (t - 0.66f) / 0.34f;
+        r = 255;
+        g = 255;
+        b = (int)(155.0f + 100.0f * k);
+    }
+    return rgb_u32(r, g, b);
+}
+
+/* HSV -> RGB. h in degrees, s and v in [0,1]. Outputs in [0,1]. */
+static void hsv_to_rgb01(float h, float s, float v, float *r, float *g, float *b)
+{
+    if (s <= 0.0f) { *r = *g = *b = v; return; }
+    float hh = fmodf(h, 360.0f);
+    if (hh < 0.0f) hh += 360.0f;
+    hh /= 60.0f;
+    int   i = (int)hh;
+    float f = hh - (float)i;
+    float p = v * (1.0f - s);
+    float q = v * (1.0f - s * f);
+    float t = v * (1.0f - s * (1.0f - f));
+    switch (i) {
+    case 0: *r = v; *g = t; *b = p; break;
+    case 1: *r = q; *g = v; *b = p; break;
+    case 2: *r = p; *g = v; *b = t; break;
+    case 3: *r = p; *g = q; *b = v; break;
+    case 4: *r = t; *g = p; *b = v; break;
+    default: *r = v; *g = p; *b = q; break;
+    }
+}
+
+/* Build (or return cached) overlay texture using app->overlay_scheme.
+ * Pixels where all N panels show near-black background are always rendered
+ * flat dark and excluded from any "high agreement" appearance, so blank
+ * canvas doesn't misleadingly light up in the heat views. */
+static SDL_Texture *ensure_overlay_texture(binmap_app_t *app, view_id_t view,
+                                           int cw, int ch)
+{
+    if (cw < 1 || ch < 1 || app->panel_count < 1) return NULL;
+    if (app->overlay_cache_w != cw || app->overlay_cache_h != ch)
+        invalidate_overlay_caches(app);
+
+    bool is_3d = view_is_3d(view);
+    if (!is_3d && app->overlay_cache[view]) return app->overlay_cache[view];
+
+    int scheme = app->overlay_scheme;
+    if (scheme <= 0 || scheme > NUM_OVERLAY_SCHEMES) scheme = 1;
+
+    size_t px_count = (size_t)cw * (size_t)ch;
+    int n = app->panel_count;
+
+    /* Render every panel into its own scratch buffer. Keeps the per-pixel
+     * inner loop simple and lets schemes (like CHANNEL SPLIT) inspect
+     * per-file values instead of only aggregate stats. */
+    uint32_t *bufs[BINMAP_MAX_PANELS] = {0};
+    for (int pi = 0; pi < n; pi++) {
+        bufs[pi] = (uint32_t *)calloc(px_count, sizeof(uint32_t));
+        if (!bufs[pi]) {
+            for (int j = 0; j < pi; j++) free(bufs[j]);
+            return NULL;
+        }
+        render_view_pixels(app, pi, view, cw, ch, bufs[pi]);
+    }
+
+    uint32_t *out = (uint32_t *)calloc(px_count, sizeof(uint32_t));
+    if (!out) { for (int pi = 0; pi < n; pi++) free(bufs[pi]); return NULL; }
+
+    const uint32_t bg_flat = rgb_u32(BG_FLAT_R, BG_FLAT_G, BG_FLAT_B);
+    const float max_var = 3.0f * 128.0f * 128.0f;
+    float inv_n = 1.0f / (float)n;
+
+    for (size_t i = 0; i < px_count; i++) {
+        uint8_t rvals[BINMAP_MAX_PANELS];
+        uint8_t gvals[BINMAP_MAX_PANELS];
+        uint8_t bvals[BINMAP_MAX_PANELS];
+        int bg_count = 0;
+
+        for (int pi = 0; pi < n; pi++) {
+            uint32_t c = bufs[pi][i];
+            uint8_t r = (uint8_t)((c >> 16) & 0xFF);
+            uint8_t g = (uint8_t)((c >> 8)  & 0xFF);
+            uint8_t b = (uint8_t)( c        & 0xFF);
+            rvals[pi] = r; gvals[pi] = g; bvals[pi] = b;
+            if (r < BG_CHANNEL_MAX && g < BG_CHANNEL_MAX && b < BG_CHANNEL_MAX)
+                bg_count++;
+        }
+        /* Every file shows this pixel as background — flat dark, don't feed
+         * the "agreement" signal so it doesn't misleadingly light up. */
+        if (bg_count == n) { out[i] = bg_flat; continue; }
+
+        /* Common accumulators for all schemes. */
+        float sr = 0, sg = 0, sb = 0, sr2 = 0, sg2 = 0, sb2 = 0;
+        uint8_t mxr = 0, mxg = 0, mxb = 0;
+        for (int pi = 0; pi < n; pi++) {
+            float r = (float)rvals[pi];
+            float g = (float)gvals[pi];
+            float b = (float)bvals[pi];
+            sr += r; sg += g; sb += b;
+            sr2 += r*r; sg2 += g*g; sb2 += b*b;
+            if (rvals[pi] > mxr) mxr = rvals[pi];
+            if (gvals[pi] > mxg) mxg = gvals[pi];
+            if (bvals[pi] > mxb) mxb = bvals[pi];
+        }
+        float mr = sr * inv_n, mg = sg * inv_n, mb = sb * inv_n;
+        float vr = sr2 * inv_n - mr * mr;
+        float vg = sg2 * inv_n - mg * mg;
+        float vb = sb2 * inv_n - mb * mb;
+        float var = vr + vg + vb; if (var < 0) var = 0;
+        float norm = var / max_var; if (norm > 1.0f) norm = 1.0f;
+        float agreement = 1.0f - sqrtf(norm);
+        if (agreement < 0) agreement = 0;
+
+        uint32_t color;
+        switch (scheme) {
+        case 1: {   /* AGREEMENT COLOR — content preserved, divergence dims */
+            float a = powf(agreement, 0.6f);
+            color = rgb_u32((int)(mr * a), (int)(mg * a), (int)(mb * a));
+            break;
+        }
+        case 2: {   /* AGREEMENT HEAT — bright = files agree on content */
+            color = heat_color_local(agreement);
+            break;
+        }
+        case 3: {   /* DIFFERENCE HEAT — bright = files disagree */
+            color = heat_color_local(1.0f - agreement);
+            break;
+        }
+        case 4: {   /* CHANNEL SPLIT — each file colored by hue, added */
+            float rr = 0, gg = 0, bb = 0;
+            for (int pi = 0; pi < n; pi++) {
+                float intensity = (0.299f * (float)rvals[pi]
+                                 + 0.587f * (float)gvals[pi]
+                                 + 0.114f * (float)bvals[pi]) / 255.0f;
+                float hue = (float)pi * 360.0f / (float)n;
+                float hr, hg, hb;
+                hsv_to_rgb01(hue, 1.0f, intensity, &hr, &hg, &hb);
+                rr += hr; gg += hg; bb += hb;
+            }
+            color = rgb_u32((int)(rr * 255.0f),
+                            (int)(gg * 255.0f),
+                            (int)(bb * 255.0f));
+            break;
+        }
+        case 5: {   /* MAX BLEND — per-channel max, union of features */
+            color = rgb_u32((int)mxr, (int)mxg, (int)mxb);
+            break;
+        }
+        default:
+            color = bg_flat;
+            break;
+        }
+        out[i] = color;
+    }
+
+    for (int pi = 0; pi < n; pi++) free(bufs[pi]);
+
+    if (!app->overlay_cache[view]) {
+        app->overlay_cache[view] = SDL_CreateTexture(app->renderer,
+            SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, cw, ch);
+        if (!app->overlay_cache[view]) { free(out); return NULL; }
+        SDL_SetTextureScaleMode(app->overlay_cache[view], SDL_SCALEMODE_NEAREST);
+    }
+    SDL_UpdateTexture(app->overlay_cache[view], NULL, out, cw * (int)sizeof(uint32_t));
+    free(out);
+    app->overlay_cache_w = cw;
+    app->overlay_cache_h = ch;
+    return app->overlay_cache[view];
 }
 
 static SDL_Texture *ensure_minimap_texture(binmap_app_t *app, int pi, int w)
@@ -319,6 +569,9 @@ static void compute_layout(binmap_app_t *app)
     int canvas_top = STATUS_BAR_H;
     int total_h = app->win_h - canvas_top;
     if (total_h < 1) total_h = 1;
+
+    /* Overlay mode: single full-canvas image, no per-panel rects, no sliders. */
+    if (app->mode == MODE_OVERLAY) return;
 
     if (app->mode == MODE_FOCUS) {
         int pi = app->focus_panel;
@@ -437,6 +690,7 @@ static void set_range_panel(binmap_app_t *app, int pi, size_t new_start, size_t 
     p->range_start = new_start;
     p->range_end   = new_end;
     free_panel_caches(app, pi);
+    invalidate_overlay_caches(app);
     app->needs_redraw = true;
 }
 
@@ -598,20 +852,42 @@ static void draw_status_bar(binmap_app_t *app)
     format_size(sz, sizeof(sz), p->file.size);
 
     char range_info[64] = "";
-    if (p->range_start != 0 || p->range_end != p->file.size) {
+    if (app->mode != MODE_OVERLAY
+        && (p->range_start != 0 || p->range_end != p->file.size)) {
         snprintf(range_info, sizeof(range_info),
                  "  [0x%zX..0x%zX]", p->range_start, p->range_end);
     }
 
-    char pan_info[32] = "";
+    char pan_info[64] = "";
     if (app->panel_count > 1) {
-        const char *mode_str = (app->mode == MODE_FOCUS) ? "F" : "S";
-        snprintf(pan_info, sizeof(pan_info), "  <%d/%d %s>",
-                 pi + 1, app->panel_count, mode_str);
+        if (app->mode == MODE_OVERLAY) {
+            snprintf(pan_info, sizeof(pan_info),
+                     "  <%d FILES>", app->panel_count);
+        } else {
+            const char *mode_str = (app->mode == MODE_FOCUS) ? "F" : "S";
+            snprintf(pan_info, sizeof(pan_info), "  <%d/%d %s>",
+                     pi + 1, app->panel_count, mode_str);
+        }
     }
 
     char right[512];
-    if (view_is_3d(app->current_view)) {
+    if (app->mode == MODE_OVERLAY) {
+        int scheme = app->overlay_scheme;
+        if (scheme < 1 || scheme > NUM_OVERLAY_SCHEMES) scheme = 1;
+        const char *scheme_name = overlay_scheme_names[scheme];
+        if (view_is_3d(app->current_view)) {
+            snprintf(right, sizeof(right),
+                     "OVERLAY [%d/%d] %s%s  YAW %.0f  PITCH %.0f  ZOOM %.2fX%s",
+                     scheme, NUM_OVERLAY_SCHEMES, scheme_name, pan_info,
+                     app->yaw   * 180.0 / M_PI,
+                     app->pitch * 180.0 / M_PI,
+                     app->zoom,
+                     app->auto_rotate ? "  AUTO" : "");
+        } else {
+            snprintf(right, sizeof(right), "OVERLAY [%d/%d] %s%s",
+                     scheme, NUM_OVERLAY_SCHEMES, scheme_name, pan_info);
+        }
+    } else if (view_is_3d(app->current_view)) {
         snprintf(right, sizeof(right),
                  "%s (%s)%s%s  YAW %.0f  PITCH %.0f  ZOOM %.2fX%s",
                  basename_of(p->file.path), sz, range_info, pan_info,
@@ -896,6 +1172,21 @@ static void redraw(binmap_app_t *app)
     SDL_RenderClear(app->renderer);
     compute_layout(app);
 
+    if (app->mode == MODE_OVERLAY) {
+        int cw = app->win_w;
+        int ch = app->win_h - STATUS_BAR_H;
+        SDL_Texture *tex = ensure_overlay_texture(app, app->current_view, cw, ch);
+        if (tex) {
+            SDL_FRect dst = {0, (float)STATUS_BAR_H, (float)cw, (float)ch};
+            SDL_RenderTexture(app->renderer, tex, NULL, &dst);
+        }
+        draw_status_bar(app);
+        draw_legend(app);
+        draw_description(app);
+        SDL_RenderPresent(app->renderer);
+        return;
+    }
+
     for (int pi = 0; pi < app->panel_count; pi++) {
         binmap_panel_t *p = &app->panels[pi];
         if (p->canvas_rect.w < 1 || p->canvas_rect.h < 1) continue;
@@ -936,6 +1227,7 @@ static void rotate_3d(binmap_app_t *app, float dyaw, float dpitch)
     while (app->yaw >  (float)(2 * M_PI)) app->yaw -= (float)(2 * M_PI);
     while (app->yaw < -(float)(2 * M_PI)) app->yaw += (float)(2 * M_PI);
     invalidate_3d_caches(app);
+    invalidate_overlay_3d_caches(app);
     app->needs_redraw = true;
 }
 
@@ -950,6 +1242,7 @@ static void zoom_3d(binmap_app_t *app, float factor)
     if (app->zoom < ZOOM_MIN) app->zoom = ZOOM_MIN;
     if (app->zoom > ZOOM_MAX) app->zoom = ZOOM_MAX;
     invalidate_3d_caches(app);
+    invalidate_overlay_3d_caches(app);
     app->needs_redraw = true;
 }
 
@@ -960,6 +1253,7 @@ static void reset_view(binmap_app_t *app)
     app->zoom = 1.0f;
     app->auto_rotate = true;
     invalidate_3d_caches(app);
+    invalidate_overlay_3d_caches(app);
     app->needs_redraw = true;
 }
 
@@ -1133,15 +1427,20 @@ static void handle_mouse_motion(binmap_app_t *app, int mx, int my)
 
 static void handle_mouse_up(binmap_app_t *app)
 {
+    bool any_changed = false;
     for (int i = 0; i < app->panel_count; i++) {
         binmap_panel_t *p = &app->panels[i];
         if (p->drag_mode == DRAG_NONE) continue;
         bool changed = (p->range_start != p->drag_anchor_start)
                     || (p->range_end   != p->drag_anchor_end);
         p->drag_mode = DRAG_NONE;
-        if (changed) free_panel_caches(app, i);
+        if (changed) {
+            free_panel_caches(app, i);
+            any_changed = true;
+        }
         app->needs_redraw = true;
     }
+    if (any_changed) invalidate_overlay_caches(app);
 }
 
 /* ---------- keys ---------- */
@@ -1184,12 +1483,35 @@ static void handle_key(binmap_app_t *app, SDL_Keycode k, SDL_Keymod mod, bool *r
 
     case SDLK_F:
         if (app->panel_count > 1) {
+            if (app->mode == MODE_OVERLAY) {
+                /* leave overlay first */
+                app->mode = app->prev_mode;
+                app->overlay_scheme = 0;
+            }
             if (app->mode == MODE_SPLIT) {
                 app->mode = MODE_FOCUS;
                 app->focus_panel = pi;
-            } else {
+            } else if (app->mode == MODE_FOCUS) {
                 app->mode = MODE_SPLIT;
             }
+            app->needs_redraw = true;
+        }
+        break;
+
+    case SDLK_H:
+        if (app->panel_count > 1) {
+            if (app->mode != MODE_OVERLAY) {
+                app->prev_mode = app->mode;
+                app->mode = MODE_OVERLAY;
+                app->overlay_scheme = 1;
+            } else {
+                app->overlay_scheme++;
+                if (app->overlay_scheme > NUM_OVERLAY_SCHEMES) {
+                    app->mode = app->prev_mode;
+                    app->overlay_scheme = 0;
+                }
+            }
+            invalidate_overlay_caches(app);
             app->needs_redraw = true;
         }
         break;
@@ -1276,6 +1598,7 @@ static void print_usage(const char *prog)
         "Keys:\n"
         "  TAB / SHIFT+TAB   next / previous view (linked across panels)\n"
         "  F                 toggle split / focus mode\n"
+        "  H                 cycle overlay heatmap schemes (off/1..5)\n"
         "  1..9              select panel (focus mode: switch focused file)\n"
         "  CTRL+TAB          cycle to next panel\n"
         "  M                 toggle thumbnail strip (focus mode)\n"
@@ -1340,6 +1663,8 @@ int main(int argc, char **argv)
     app.active_panel     = 0;
     app.focus_panel      = 0;
     app.mode             = focus_start ? MODE_FOCUS : MODE_SPLIT;
+    app.prev_mode        = app.mode;
+    app.overlay_scheme   = 0;
     app.show_thumb_strip = false;
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -1434,11 +1759,13 @@ int main(int argc, char **argv)
             app.yaw += 0.6f * dt;
             if (app.yaw > (float)(2 * M_PI)) app.yaw -= (float)(2 * M_PI);
             invalidate_3d_caches(&app);
+            invalidate_overlay_3d_caches(&app);
             app.needs_redraw = true;
         }
     }
 
     invalidate_caches(&app);
+    invalidate_overlay_caches(&app);
     for (int i = 0; i < app.panel_count; i++) {
         if (app.panels[i].minimap_tex) {
             SDL_DestroyTexture(app.panels[i].minimap_tex);
